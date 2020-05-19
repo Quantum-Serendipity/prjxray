@@ -1058,6 +1058,7 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 	bool mfwr_has_own_far = false;
 
 	Configuration<ArchType>::FrameMap frames;
+	bool configuration_data_end = false;
 	for (auto packet : packets) {
 		if (packet.opcode() !=
 		    ConfigurationPacket<
@@ -1135,6 +1136,8 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 					    frame_address_register;
 					start_new_write = false;
 				}
+				if (configuration_data_end)
+					break;
 
 				if (packet.data().size() >=
 				    ArchType::words_per_frame) {
@@ -1158,8 +1161,10 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 					auto next_address =
 					    part.GetNextFrameAddress(
 					        current_frame_address);
-					if (!next_address)
+					if (!next_address) {
+						configuration_data_end = true;
 						break;
+					}
 
 					// Bitstreams appear to have 2 frames of
 					// padding between rows.
