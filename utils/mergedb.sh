@@ -404,6 +404,52 @@ case "$1" in
 		exit 1
 esac
 
+# --- prjcombine cross-validation merge gate ----------------------------------
+#
+# An INDEPENDENT oracle, in the merge path. prjcombine's 7-series bit database
+# was reverse-engineered with ISE 14.7 + xdl/bitgen, not Vivado, so a solver
+# that invents a coordinate is caught here by something that never saw the tool
+# that produced it. Three checks:
+#
+#   [C] every bit coordinate in the incoming file is one prjcombine documents
+#       for that tile class -- needs no feature-name table, so it covers every
+#       mapped tile type immediately, and it is the one with teeth;
+#   [R] every coordinate is inside the tile's own frames x words*32 box;
+#   [F] for features with a hand-written prjcombine counterpart, the bit sets
+#       are set-identical.
+#
+# A tile type outside prjcombine's coverage table prints `gate: SKIP` and exits
+# 0 -- a NAMED, enumerable gap, not a silent pass. Anything the parser cannot
+# account for is exit 2, never a warning. mask_* types fall into SKIP, so mask
+# merges are unaffected.
+#
+# Position matters twice. It is after the tile-type-normalising `case`, so
+# "$tmp1" already carries the final TILE_TYPE prefix that prjcombine is indexed
+# by; and it is before `touch "$db"`, so under the `set -e` at the top of this
+# script a rejection aborts BEFORE the database is touched at all. It also runs
+# inside the flock taken above, which is released only on script exit, so no
+# other worker can land a merge past it while it is thinking.
+#
+# --db-root is where the [R] check reads tilegrid.json from. It prefers the
+# pinned full database and falls back to the workspace's own, which several
+# fuzzers redirect to $FUZDIR/build/database for a staging merge; if neither
+# carries a tilegrid the range check reports itself as NOT RUN rather than
+# passing silently.
+#
+# Two ways off: XRAY_CROSSVALIDATE=0, and XC7DPR_ROOT unset. The second is what
+# makes this safe to carry -- an ordinary prjxray checkout without this repo
+# beside it behaves exactly as before.
+#
+# Measured cost: 0.55 s per merge (artix7 segbits_int_l.db, 1,598 coordinates,
+# warm), against ~229 merge sites in a full five-family campaign.
+if [ "${XRAY_CROSSVALIDATE:-1}" = 1 ] && [ -n "${XC7DPR_ROOT:-}" ] ; then
+	python3 "$XC7DPR_ROOT/scripts/prjcombine-crossvalidate.py" \
+		--gate "$1" "$tmp1" \
+		--db-root "${PRJXRAY_DB_DIR:-$XRAY_DATABASE_DIR}" \
+		--family "$XRAY_DATABASE"
+fi
+# --- end prjcombine cross-validation merge gate -------------------------------
+
 touch "$db"
 if $ismask ; then
     sort -u "$tmp1" "$db" | grep -v '<.*>' > "$tmp2" || true
