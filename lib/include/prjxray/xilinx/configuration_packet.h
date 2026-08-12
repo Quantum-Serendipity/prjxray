@@ -51,6 +51,17 @@ class ConfigurationPacket {
 	      address_(address),
 	      data_(std::move(data)) {}
 
+	// A ConfigurationPackage is a vector of
+	// std::unique_ptr<ConfigurationPacket>, and every packet actually put
+	// into one is a DERIVED type (NopPacket,
+	// ConfigurationPacketWithPayload<N>). Deleting those through a base
+	// pointer with a non-virtual destructor is undefined behaviour, and
+	// AddressSanitizer reports it as new-delete-type-mismatch -- 24 of them
+	// on a single xc7frames2bit run of the ordinary FULL bitstream path,
+	// before this line existed. Not introduced by the partial-bitstream
+	// work; surfaced by running it under ASan.
+	virtual ~ConfigurationPacket() = default;
+
 	unsigned int header_type() const { return header_type_; }
 	const Opcode opcode() const { return opcode_; }
 	const ConfigRegType address() const { return address_; }

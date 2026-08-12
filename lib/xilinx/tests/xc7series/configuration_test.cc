@@ -319,120 +319,248 @@ TEST(ConfigurationTest, CheckForPaddingFrames) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Partial bitstreams.
+//
+// A part with two CLB_IO_CLK columns of 4 frames each in row 0 and one in
+// row 1, plus two BLOCK_RAM columns. Small enough to write the expected frame
+// set out by hand, and big enough to have the three discontinuities that
+// matter: a column that the caller only half-covers, a row boundary, and a
+// block-type boundary.
+namespace {
+
+xc7series::Part MakeTestPart() {
+	std::vector<xc7series::FrameAddress> addresses;
+	auto add = [&addresses](xc7series::BlockType blk, int row, int col,
+	                        int frames) {
+		for (int m = 0; m < frames; ++m)
+			addresses.push_back(xc7series::FrameAddress(
+			    blk, false, row, col, m));
+	};
+	add(xc7series::BlockType::CLB_IO_CLK, 0, 0, 4);
+	add(xc7series::BlockType::CLB_IO_CLK, 0, 1, 4);
+	add(xc7series::BlockType::CLB_IO_CLK, 1, 0, 4);
+	add(xc7series::BlockType::BLOCK_RAM, 0, 0, 4);
+	add(xc7series::BlockType::BLOCK_RAM, 0, 1, 4);
+	return xc7series::Part(0x1234, addresses);
+}
+
+uint32_t Addr(xc7series::BlockType blk, int row, int col, int minor) {
+	return static_cast<uint32_t>(
+	    xc7series::FrameAddress(blk, false, row, col, minor));
+}
+
+void AddFrame(Frames<Series7>::Frames2Data* frames,
+              uint32_t address,
+              uint32_t fill) {
+	frames->emplace(xc7series::FrameAddress(address),
+	                std::vector<uint32_t>(101, fill));
+}
+
+}  // namespace
+
+// Derive-from-input: the emitted frame set is the input frame set, and a gap
+// in the input becomes a new FAR block rather than a run of zero frames.
+TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	// Two frames at the end of CLB row 0 col 0, then a GAP over col 1
+	// minors 0-1, then col 1 minors 2-3.
+	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 2), 0xAA);
+	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 3), 0xBB);
+	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 2), 0xCC);
+	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 3), 0xDD);
+	// A whole BRAM column, which is also a block-type boundary.
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xEE);
+
+	auto blocks = Configuration<Series7>::createPartialPacketData(
+	    frames, part, /*pad_frames=*/0);
+
+	// Three runs: [clb r0 c0 m2..3], [clb r0 c1 m2..3], [bram r0 c0 m0..3].
+	ASSERT_EQ(blocks.size(), 3u);
+	EXPECT_EQ(blocks[0].first,
+	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 2));
+	EXPECT_EQ(blocks[0].second.size(), 2u * 101);
+	EXPECT_EQ(blocks[1].first,
+	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 2));
+	EXPECT_EQ(blocks[1].second.size(), 2u * 101);
+	EXPECT_EQ(blocks[2].first,
+	          Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, 0));
+	EXPECT_EQ(blocks[2].second.size(), 4u * 101);
+
+	// Total words == total input frames. Nothing was invented.
+	size_t words = 0;
+	for (auto& b : blocks)
+		words += b.second.size();
+	EXPECT_EQ(words, frames.size() * 101);
+
+	// And the payloads are the caller's, in order.
+	EXPECT_EQ(blocks[0].second.front(), 0xAAu);
+	EXPECT_EQ(blocks[0].second.at(101), 0xBBu);
+	EXPECT_EQ(blocks[1].second.front(), 0xCCu);
+
+	// The frame-set check agrees, walking forward from each FAR.
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
+	                                                       part, 0),
+	          frames.size());
+}
+
+// A run that crosses a row boundary is split, because the hardware inserts two
+// pad frames there and a block spanning one would need padding in the middle.
+TEST(ConfigurationTest, PartialPacketDataSplitsAtRowBoundary) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, m), 0x11);
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 1, 0, m), 0x22);
+
+	auto blocks = Configuration<Series7>::createPartialPacketData(
+	    frames, part, /*pad_frames=*/0);
+	ASSERT_EQ(blocks.size(), 2u);
+	EXPECT_EQ(blocks[0].first,
+	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 0));
+	EXPECT_EQ(blocks[1].first,
+	          Addr(xc7series::BlockType::CLB_IO_CLK, 1, 0, 0));
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
+	                                                       part, 0),
+	          8u);
+}
+
+// --pad_frames defaults to 0. When it is raised, pads go ONLY on a block that
+// ends at a row/bus boundary -- which is where the device has dummy frame
+// positions and where Vivado puts them. A block that stops mid-row gets none,
+// because there a pad would land on a live static frame.
+TEST(ConfigurationTest, PartialPacketDataPadsOnlyAtRowEnds) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+
+	// Block ending MID-ROW: col 0 minors 0-2 of a 4-frame column.
+	Frames<Series7>::Frames2Data midrow;
+	for (int m = 0; m < 3; ++m)
+		AddFrame(&midrow,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x33);
+	auto a = Configuration<Series7>::createPartialPacketData(midrow, part, 0);
+	auto b = Configuration<Series7>::createPartialPacketData(midrow, part, 2);
+	ASSERT_EQ(a.size(), 1u);
+	ASSERT_EQ(b.size(), 1u);
+	EXPECT_EQ(a[0].second.size(), 3u * 101);
+	EXPECT_EQ(b[0].second.size(), 3u * 101);  // no pad: mid-row
+
+	// Block ending at a ROW END: all of CLB row 0, cols 0 and 1.
+	Frames<Series7>::Frames2Data rowend;
+	for (int col = 0; col < 2; ++col)
+		for (int m = 0; m < 4; ++m)
+			AddFrame(&rowend,
+			         Addr(xc7series::BlockType::CLB_IO_CLK, 0, col,
+			              m),
+			         0x44);
+	auto none = Configuration<Series7>::createPartialPacketData(rowend, part,
+	                                                            0);
+	auto padded = Configuration<Series7>::createPartialPacketData(rowend,
+	                                                              part, 2);
+	ASSERT_EQ(none.size(), 1u);
+	ASSERT_EQ(padded.size(), 1u);
+	EXPECT_EQ(none[0].second.size(), 8u * 101);
+	EXPECT_EQ(padded[0].second.size(), 10u * 101);
+	for (size_t i = 8 * 101; i < padded[0].second.size(); ++i)
+		EXPECT_EQ(padded[0].second[i], 0u);
+
+	// Either way the frame SET is the input's, and the check knows which
+	// padding it was built with.
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(none, rowend,
+	                                                       part, 0),
+	          8u);
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(padded, rowend,
+	                                                       part, 2),
+	          8u);
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(padded, rowend,
+	                                                          part, 0),
+	             std::runtime_error);
+}
+
+// The check must discriminate, not merely pass: a block whose length claims
+// more frames than the caller asked for is rejected, naming the first address
+// outside the input.
+TEST(ConfigurationTest, PartialFrameSetCheckRejectsALeak) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 2; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x44);
+
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	                                                              part, 0);
+	ASSERT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
+	                                                       part, 0),
+	          2u);
+	// Grow the block by one frame without telling the caller -- exactly
+	// what the zero-fill design did, 2,032 times over.
+	blocks[0].second.resize(3 * 101, 0);
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
+	                                                          part, 0),
+	             std::runtime_error);
+	// ...and a block that drops a frame is rejected too.
+	blocks[0].second.resize(1 * 101, 0);
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
+	                                                          part, 0),
+	             std::runtime_error);
+}
+
+// An address the part does not have is an error, not a silent walk off the end
+// of the device. This is one of the four inputs that used to spin at 100% CPU.
+TEST(ConfigurationTest, PartialPacketDataRejectsInvalidAddress) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0), 0x55);
+	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 7, 9, 0), 0x66);
+	EXPECT_THROW(
+	    Configuration<Series7>::createPartialPacketData(frames, part, 0),
+	    std::runtime_error);
+}
+
+// Antmicro's original test, adapted to the derive-from-input API: the package
+// still carries one FAR write per block, in ascending address order, with the
+// CLB block before the BRAM one.
 TEST(ConfigurationTest, CreatePartialConfigurationPackage) {
-	namespace xilinx = prjxray::xilinx;
-	std::vector<xc7series::FrameAddress> test_part_addresses = {
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            0, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            1, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            2, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            3, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            4, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            5, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            6, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            7, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
-	                            8, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 0,
-	                            0, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 0,
-	                            1, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 0,
-	                            2, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 0,
-	                            3, 0),
-	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 0,
-	                            4, 0)};
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xBC);
 
-	auto test_part = absl::optional<xc7series::Part>(
-	    xc7series::Part(0x1234, test_part_addresses));
-
-	// There are CLB_IO_CLK blocks in address space:
-	// <0x100,0x200> plus <0x380,0x400> and BRAM blocks at:
-	// <0x800000> plus <0x800180>. We create address gaps which should be
-	// filled with zero frames and the final configuration package should
-	// have two data packets separated with two different FAR addresses: one
-	// for CLB_IO_CLK=<0x100> and second for BRAM=<0x800000>
-	const uint32_t clb_start_address = 0x100;
-	const uint32_t clb_end_address = 0x400;
-	const uint32_t bram_start_address = 0x800000;
-	const uint32_t bram_end_address = 0x800180;
-	Frames<Series7> frames;
-	frames.getFrames().emplace(std::make_pair(
-	    test_part_addresses.at(2), std::vector<uint32_t>(101, 0xAA)));
-	frames.getFrames().emplace(std::make_pair(
-	    test_part_addresses.at(3), std::vector<uint32_t>(101, 0xBB)));
-	frames.getFrames().emplace(std::make_pair(
-	    test_part_addresses.at(4), std::vector<uint32_t>(101, 0xCC)));
-	frames.getFrames().emplace(std::make_pair(
-	    test_part_addresses.at(7), std::vector<uint32_t>(101, 0xDD)));
-	frames.getFrames().emplace(std::make_pair(
-	    test_part_addresses.at(8), std::vector<uint32_t>(101, 0xEE)));
-	frames.getFrames().emplace(std::make_pair(
-	    test_part_addresses.at(9), std::vector<uint32_t>(101, 0xAB)));
-	frames.getFrames().emplace(std::make_pair(
-	    test_part_addresses.at(12), std::vector<uint32_t>(101, 0xBC)));
-	ASSERT_EQ(frames.getFrames().size(), 7);
-
-	// Fill address gaps with zero frames
-	frames.addMissingFrames(test_part, clb_start_address, clb_end_address,
-	                        bram_start_address, bram_end_address);
-
-	// Split frames into separate CLB_IO_CLK and BRAM related
-	typename Frames<Series7>::Frames2Data clb_frames, bram_frames;
-	clb_frames.insert(frames.getFrames().find(clb_start_address),
-	                  frames.getFrames().find(clb_end_address));
-	bram_frames.insert(frames.getFrames().find(bram_start_address),
-	                   frames.getFrames().find(bram_end_address));
-	// Check if all columns are present. We expect to have <2,7> columns
-	// for CLB_IO_CLK blocks and <0,2> for BRAM blocks.
-	uint8_t clb_index = clb_frames.begin()->first.column();
-	for (auto frm : clb_frames) {
-		ASSERT_EQ(frm.first.column(), clb_index);
-		clb_index++;
-	}
-	uint8_t bram_index = bram_frames.begin()->first.column();
-	for (auto frm : bram_frames) {
-		ASSERT_EQ(frm.first.column(), bram_index);
-		bram_index++;
-	}
-
-	Configuration<Series7>::PacketData clb_packet_data =
-	    Configuration<Series7>::createType2ConfigurationPacketData(
-	        clb_frames, test_part);
-	Configuration<Series7>::PacketData bram_packet_data =
-	    Configuration<Series7>::createType2ConfigurationPacketData(
-	        bram_frames, test_part);
-
-	std::map<uint32_t, typename xilinx::Configuration<Series7>::PacketData>
-	    cfg_packets = {{clb_start_address, clb_packet_data},
-	                   {bram_start_address, bram_packet_data}};
-
+	// NOTE: cfg_packets must outlive partial_configuration_package. The
+	// FDRI packets hold non-owning spans over it.
+	auto cfg_packets = Configuration<Series7>::createPartialPacketData(
+	    frames, part, 0);
 	Series7::ConfigurationPackage partial_configuration_package;
-	xilinx::Configuration<Series7>::createPartialConfigurationPackage(
-	    partial_configuration_package, cfg_packets, test_part);
+	Configuration<Series7>::createPartialConfigurationPackage(
+	    partial_configuration_package, cfg_packets, part);
 
-	// Partial bitstream should have a separate FAR address setup command
-	// for CLB_IO_CLK and BRAM.
-	bool clb_far_address = false;
+	std::vector<uint32_t> far_writes;
 	for (auto& cfg : partial_configuration_package) {
-		if (cfg.get()->address() == Series7ConfigurationRegister::FAR) {
-			if (!clb_far_address) {
-				EXPECT_EQ(cfg.get()->data()[0],
-				          clb_start_address);
-				clb_far_address = true;
-			} else {
-				EXPECT_EQ(cfg.get()->data()[0],
-				          bram_start_address);
-				break;
-			}
-		}
+		if (cfg->address() == Series7::ConfRegType::FAR)
+			far_writes.push_back(cfg->data()[0]);
 	}
+	// Two data blocks plus the trailing park FAR. 0x03be0000 decodes to
+	// block_type 7, reserved on every 7-series part, and Vivado emits it
+	// itself -- it is deliberately kept.
+	ASSERT_EQ(far_writes.size(), 3u);
+	EXPECT_EQ(far_writes[0], Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0));
+	EXPECT_EQ(far_writes[1], Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, 0));
+	EXPECT_EQ(far_writes[2], 0x03be0000u);
+
+	// The FDRI payloads still point at live storage after the call.
+	size_t fdri_words = 0;
+	for (auto& cfg : partial_configuration_package) {
+		if (cfg->address() == Series7::ConfRegType::FDRI)
+			fdri_words += cfg->data().size();
+	}
+	EXPECT_EQ(fdri_words, frames.size() * 101);
 }

@@ -50,7 +50,7 @@ Configuration<Spartan6>::createType2ConfigurationPacketData(
 template <>
 void Configuration<Spartan6>::createPartialConfigurationPackage(
     Spartan6::ConfigurationPackage& out_packets,
-    std::map<uint32_t, PacketData> cfg_packets,
+    const PartialPacketData& cfg_packets,
     absl::optional<Spartan6::Part>& part) {
 	throw std::runtime_error(
 	    "Partial bitstream generation for this architecture is not "
@@ -310,7 +310,7 @@ void Configuration<Spartan6>::createConfigurationPackage(
 template <>
 void Configuration<Series7>::createPartialConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
-    std::map<uint32_t, PacketData> cfg_packets,
+    const PartialPacketData& cfg_packets,
     absl::optional<Series7::Part>& part) {
 	using ArchType = Series7;
 	using ConfigurationRegister = ArchType::ConfRegType;
@@ -356,13 +356,19 @@ void Configuration<Series7>::createPartialConfigurationPackage(
 	        {static_cast<uint32_t>(xc7series::Command::WCFG)}));
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 
-	// Generate data packets for each address space
-	std::map<uint32_t, PacketData>::iterator it;
-	for (auto& it : cfg_packets) {
+	// One FAR + FDRI block per run of consecutive frames. cfg_packets is a
+	// const reference into the caller's storage and the spans below point
+	// straight at it: it MUST outlive out_packets. See the declaration.
+	//
+	// Per UG470 the command in CMD is re-executed on every FAR write, so
+	// the single WCFG above covers all of these blocks. Vivado emits a
+	// WCFG per block instead; that divergence is Unit 6.2's, not this
+	// unit's, and is deliberately left alone here.
+	for (auto& block : cfg_packets) {
 		out_packets.emplace_back(new ConfigurationPacketWithPayload<
 		                         1, ConfigurationRegister>(
 		    ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-		    ConfigurationRegister::FAR, {it.first}));
+		    ConfigurationRegister::FAR, {block.first}));
 		out_packets.emplace_back(
 		    new NopPacket<ConfigurationRegister>());
 
@@ -375,7 +381,7 @@ void Configuration<Series7>::createPartialConfigurationPackage(
 		                         ConfigurationRegister>(
 		    TYPE2,
 		    ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-		    ConfigurationRegister::FDRI, it.second));
+		    ConfigurationRegister::FDRI, block.second));
 	}
 
 	// Finalization sequence
@@ -387,6 +393,14 @@ void Configuration<Series7>::createPartialConfigurationPackage(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
 	        ConfigurationRegister::CTL0, {0x0}));
+	// DO NOT "fix" this address. 0x03be0000 decodes to block_type = 7
+	// (FAR bits 25:23), which is RESERVED on every 7-series part, so this
+	// parks the frame-address register where no frame lives. It was
+	// reported as a magic-number defect; it is not one. Vivado emits the
+	// identical word in the identical position of its own partial
+	// bitstreams: docs/far-double-write-verdict.md section 2 decodes it
+	// straight out of a Vivado 2025.2 partial for xc7a100tcsg324-1 as
+	//     FAR    =  0x03be0000  (blk7 tb0 row31 col0 minor0)
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
@@ -584,7 +598,7 @@ void Configuration<Series7>::createConfigurationPackage(
 template <>
 void Configuration<UltraScale>::createPartialConfigurationPackage(
     UltraScale::ConfigurationPackage& out_packets,
-    std::map<uint32_t, PacketData> cfg_packets,
+    const PartialPacketData& cfg_packets,
     absl::optional<UltraScale::Part>& part) {
 	throw std::runtime_error(
 	    "Partial bitstream generation for this architecture is not "
@@ -755,7 +769,7 @@ void Configuration<UltraScale>::createConfigurationPackage(
 template <>
 void Configuration<UltraScalePlus>::createPartialConfigurationPackage(
     UltraScalePlus::ConfigurationPackage& out_packets,
-    std::map<uint32_t, PacketData> cfg_packets,
+    const PartialPacketData& cfg_packets,
     absl::optional<UltraScalePlus::Part>& part) {
 	throw std::runtime_error(
 	    "Partial bitstream generation for this architecture is not "
