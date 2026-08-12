@@ -62,8 +62,21 @@ class Frames {
        private:
 	Frames2Data frames_data_;
 
-	// Updates the ECC information in the frame
-	void updateECC(FrameData& data);
+	// Updates the ECC information in the frame -- IF the frame has one.
+	//
+	// It takes the address because on 7-series that is what decides. Word
+	// 50 of a CLB_IO_CLK frame is the frame ECC; word 50 of a BLOCK_RAM
+	// frame is block RAM content, and Vivado writes no ECC there at all:
+	// zero in 1,792 of 1,792 BLOCK_RAM frames of a full bitstream carrying
+	// 30 initialised block RAMs, and zero in 772 of 772 across both passes
+	// of every partial of both DFX benches, while 39 of the same
+	// bitstream's CLB frames carry a nonzero one. Computing it anyway
+	// corrupts exactly the frames that hold data -- 16 per module in the
+	// measured corpus -- and no frame-set checker sees it, because the
+	// writer and the checker agree with each other and not with Vivado.
+	// docs/far-double-write-verdict.md sections 5.1 and 9.4.
+	void updateECC(const typename ArchType::FrameAddress& address,
+	               FrameData& data);
 };
 
 template <typename ArchType>
@@ -112,11 +125,11 @@ int Frames<ArchType>::readFrames(const std::string& frm_file_str) {
 			               return std::stoul(val, nullptr, 16);
 		               });
 
-		updateECC(frame_data);
+		typename ArchType::FrameAddress frm_addr(frame_address);
+		updateECC(frm_addr, frame_data);
 
 		// Insert the frame address and corresponding frame data to the
 		// map
-		typename ArchType::FrameAddress frm_addr(frame_address);
 		frames_data_.insert(
 		    std::pair<typename ArchType::FrameAddress, FrameData>(
 		        frm_addr, frame_data));

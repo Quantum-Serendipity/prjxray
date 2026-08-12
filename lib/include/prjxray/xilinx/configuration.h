@@ -24,9 +24,43 @@
 #include <prjxray/bit_ops.h>
 #include <prjxray/xilinx/architectures.h>
 #include <prjxray/xilinx/frames.h>
+#include <prjxray/xilinx/xc7series/prepass_geometry.h>
 
 namespace prjxray {
 namespace xilinx {
+
+// What createPrePassFrames did, in numbers, so the caller can print it. Two of
+// these counters exist because docs/far-double-write-verdict.md section 5.1
+// flags two elements of the SITE mask as INFERRED rather than measured: the
+// SLICE*_X1 half of the PRECYINIT.CIN exclusion (bit 31_12, never seen in a
+// bitstream) and the four {A,B}REG_0 minor-27 DSP bits. If a future golden ever
+// disagrees with this writer, the first question is whether an inferred element
+// fired, and a counter answers it where a comment cannot.
+struct PrePassReport {
+	size_t clb_frames = 0;
+	size_t verbatim_frames = 0;
+
+	// pass-2 bits that pass 1 withholds, and the two inferred subsets.
+	uint64_t withheld_bits = 0;
+	uint64_t inferred_cin_x1_bits = 0;
+	uint64_t inferred_dsp_reg0_bits = 0;
+
+	// Block-0 frames whose configuration column has no tile at all in
+	// tilegrid.json, so SITE was all zeros for want of geometry. 12 of
+	// xc7a100t's 234 block-0 columns are in that state.
+	std::set<uint32_t> columns_without_geometry;
+
+	// Bit-bearing tile types covered by the frames written that section
+	// 5.1's table does not name. They contribute nothing to SITE under
+	// "anything else -> nothing", which no bench has exercised.
+	std::set<std::string> unclassified_types_touched;
+
+	// Vivado writes no frame ECC in a non-CLB_IO_CLK block: word 50 is
+	// zero in 772 of 772. A nonzero one in the input is not this writer's
+	// doing -- it copies the word verbatim -- but it means the input did
+	// not come from where the measurement did.
+	size_t verbatim_frames_with_nonzero_word50 = 0;
+};
 
 // Knobs on the emitted partial-bitstream packet stream. Every default is the
 // value measured in Vivado 2025.2's own 7-series partial bitstreams
@@ -135,36 +169,46 @@ class Configuration {
 	// is already STATIC | RM.
 	//
 	// The rule, from docs/far-double-write-verdict.md section 5.1 (measured
-	// against Vivado 2025.2 on xc7a100tcsg324-1, four reconfigurable
-	// modules):
+	// against Vivado 2025.2 on xc7a100tcsg324-1, ten reconfigurable modules
+	// across two locked statics, plus the original four):
 	//
-	//   pass1[w] = STATIC[w] | (RM[w] & SITE(m,w)) | PARK(m,w)
+	//   block type 0:  pass1[w] = STATIC[w] | (RM[w] & SITE(tile,m,w))
+	//                             | PARK(m,w)
+	//                  then, per frame, recompute word 50 bits 12:0
+	//   any other:     pass1[w] = pass2[w]   verbatim, ECC word included
 	//
 	// and equivalently, for a writer that holds pass 2 rather than the RM,
 	//
 	//   pass1[w] = (pass2[w] & SITE) | PARK | (STATIC[w] & ~SITE & ~PARK)
 	//
-	// then the frame ECC recomputed. `static_frames` supplies STATIC. It is
-	// NOT recoverable from pass 2 -- the union has destroyed each bit's
-	// provenance -- which is why it is a separate input; see
-	// docs/partial-bitstream.md. When `have_static` is false the STATIC
-	// term is dropped, which is wrong in exactly the bits that carry the
-	// static's own routing inside the region (84 bits in 67 words in the
-	// measured golden), so the tool must not do that silently.
+	// `static_frames` supplies STATIC. It is NOT recoverable from pass 2 --
+	// the union has destroyed each bit's provenance -- which is why it is a
+	// separate input; see docs/partial-bitstream.md. When `have_static` is
+	// false the STATIC term is dropped, which is wrong in exactly the bits
+	// that carry the static's own routing inside the region (84 bits in 67
+	// words behind the golden's static, 142 in 121 behind the second one),
+	// so the tool must not do that silently.
 	//
-	// BLOCK TYPE. Section 5.1 states SITE/PARK over (minor, word) with no
-	// block-type term, but the measurement behind it covered block type 0
-	// (CLB_IO_CLK) only. Block type 1 (BLOCK_RAM) also has minors 24 and
-	// 25, and applying PARK there forces whole BRAM frames to all-ones --
-	// six of them in the measured golden, whose BRAM pass 1 is in fact
-	// entirely zero and byte-equal to its pass 2. So the transformation is
-	// applied to CLB_IO_CLK frames only and every other block type is
-	// carried through from pass 2 unchanged. That reproduces the golden in
-	// 1209 of 1209 frames; the literal reading reproduces 1203.
+	// SITE IS PER TILE, not per (minor, word) -- see PrePassGeometry, which
+	// supplies it. The predecessor of this function used
+	// SiteMask(minor, word) and was wrong by 2,987 bits in one module of
+	// the round-2 corpus, everywhere off the CLB columns.
+	//
+	// BLOCK TYPE. The transformation applies to block type 0 (CLB_IO_CLK)
+	// and to nothing else. Every other block type is written twice
+	// verbatim: same payload, ECC word included, no mask, no park, no
+	// recomputation. Block type 1 (BLOCK_RAM) also has minors 24 and 25,
+	// and applying PARK there forces whole BRAM frames to all-ones -- six
+	// of them in the measured golden. And prjxray's updateECC must NOT run
+	// there: word 50 of every BLOCK_RAM frame is zero in both passes, 0
+	// nonzero of 772, and updateECC would invent one in exactly the 16
+	// frames per module that carry initialised content.
 	static typename Frames<ArchType>::Frames2Data createPrePassFrames(
 	    const typename Frames<ArchType>::Frames2Data& pass2,
 	    const typename Frames<ArchType>::Frames2Data& static_frames,
-	    bool have_static);
+	    bool have_static,
+	    const xc7series::PrePassGeometry& geometry,
+	    PrePassReport* report);
 
 	// The bitstream CRC over an already-built configuration package, up to
 	// but not including the CRC write itself.
@@ -305,7 +349,9 @@ template <>
 Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
     const Frames<Series7>::Frames2Data& pass2,
     const Frames<Series7>::Frames2Data& static_frames,
-    bool have_static);
+    bool have_static,
+    const xc7series::PrePassGeometry& geometry,
+    PrePassReport* report);
 
 template <>
 uint32_t Configuration<Series7>::computeStreamCrc(
@@ -316,7 +362,9 @@ typename Frames<ArchType>::Frames2Data
 Configuration<ArchType>::createPrePassFrames(
     const typename Frames<ArchType>::Frames2Data& pass2,
     const typename Frames<ArchType>::Frames2Data& static_frames,
-    bool have_static) {
+    bool have_static,
+    const xc7series::PrePassGeometry& geometry,
+    PrePassReport* report) {
 	throw std::runtime_error(
 	    "The FAR double-write pre-pass is characterised for 7-series only. "
 	    "docs/far-double-write-verdict.md section 6 records what was not "

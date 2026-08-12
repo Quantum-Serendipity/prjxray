@@ -313,29 +313,22 @@ void Configuration<Spartan6>::createConfigurationPackage(
 // ---------------------------------------------------------------- pre-pass --
 //
 // docs/far-double-write-verdict.md section 5.1. See the declaration in
-// configuration.h for the rule and for why the block-type restriction below is
-// there even though section 5.1 does not state one.
+// configuration.h for the rule; SITE itself lives in PrePassGeometry, because
+// it is a function of the tile lattice and not of (minor, word).
 namespace {
 
 constexpr size_t kEccWord = 0x32;
-
-// The bit positions a SITE tile owns -- what pass 1 keeps of the RM.
-uint32_t SiteMask(uint8_t minor, size_t word) {
-	if (word == kEccWord)
-		return 0;  // word 50 belongs to the HCLK tile alone
-	if (minor == 0)
-		return 0x11111111;  // CLB owns bit index == 0 (mod 4)
-	if (minor == 1)
-		return 0x88888888;  // CLB owns bit index == 3 (mod 4)
-	if (minor >= 26 && minor <= 35)
-		return 0xFFFFFFFF;  // the CLB planes, in full
-	return 0;               // minors 2-25 are interconnect
-}
 
 // The fixed selector code pass 1 writes over the routing-mux planes. prjxray's
 // INT_[LR] site-input muxes are five-bit codes spanning minors 21-25 at a
 // single bit index, so this is ONE park of the selector group, not "blank
 // 16-23 and force 24-25 high" -- those read as two effects and are one.
+//
+// PARK is per (column, minor) ACTUALLY PRESENT in the block, which is what
+// iterating the caller's frames gives for free. A FAR burst can stop
+// mid-column: an ROI whose last column contributes only minor 0 never gets a
+// park, and a writer that counted frames instead would force the wrong two
+// frames high.
 uint32_t ParkMask(uint8_t minor, size_t word) {
 	if (minor >= 24 && minor <= 25 && word != kEccWord)
 		return 0xFFFFFFFF;
@@ -348,29 +341,50 @@ template <>
 Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
     const Frames<Series7>::Frames2Data& pass2,
     const Frames<Series7>::Frames2Data& static_frames,
-    bool have_static) {
+    bool have_static,
+    const xc7series::PrePassGeometry& geometry,
+    PrePassReport* report) {
 	Frames<Series7>::Frames2Data pass1;
+	PrePassReport sink;
+	PrePassReport& rep = report ? *report : sink;
 	const std::vector<uint32_t> kZeroFrame(Series7::words_per_frame, 0);
 
 	for (const auto& frame : pass2) {
 		const xc7series::FrameAddress address = frame.first;
 		const auto& words = frame.second;
 
-		// Every other block type is carried through unchanged. The
-		// recipe is measured on CLB_IO_CLK frames; PARK applied to a
-		// BLOCK_RAM frame at minor 24/25 would force it to all-ones,
-		// and the golden's BRAM pass 1 is zero.
+		// BLOCK TYPE FIRST. The transformation applies to block type 0
+		// and to nothing else; every other block type is written twice
+		// VERBATIM -- same payload, ECC word included, no mask, no
+		// park, no recomputation. Two separate hazards live here.
+		// PARK at a BLOCK_RAM minor 24/25 forces a whole frame of live
+		// block RAM to 0xFFFFFFFF. And updateECC on a BLOCK_RAM frame
+		// invents a frame ECC Vivado does not write: word 50 is zero in
+		// 772 of 772 there, both passes, content or no content, and the
+		// 16 frames per module it would corrupt are exactly the ones
+		// carrying data. Verdict sections 5.1 and 9.4.
 		if (address.block_type() != xc7series::BlockType::CLB_IO_CLK ||
 		    words.size() != Series7::words_per_frame) {
+			if (words.size() > kEccWord && words[kEccWord] != 0)
+				++rep.verbatim_frames_with_nonzero_word50;
+			++rep.verbatim_frames;
 			pass1.emplace(address, words);
 			continue;
 		}
+		++rep.clb_frames;
 
 		const auto it = static_frames.find(address);
 		const std::vector<uint32_t>& stat =
 		    (have_static && it != static_frames.end()) ? it->second
 		                                              : kZeroFrame;
 		const bool stat_ok = stat.size() == Series7::words_per_frame;
+
+		const auto& masks = geometry.MasksFor(address);
+		if (!masks.column_in_tilegrid)
+			rep.columns_without_geometry.insert(
+			    static_cast<uint32_t>(address) & ~0x7Fu);
+		for (const std::string& t : *masks.unclassified_types)
+			rep.unclassified_types_touched.insert(t);
 
 		std::vector<uint32_t> out(Series7::words_per_frame, 0);
 		const uint8_t minor = address.minor();
@@ -388,16 +402,26 @@ Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
 			// read literally, is wrong here.
 			if (w == kEccWord)
 				continue;  // out[w] is already 0
-			const uint32_t site = SiteMask(minor, w);
+			const uint32_t site = masks.site[w];
 			const uint32_t park = ParkMask(minor, w);
 			const uint32_t s = stat_ok ? stat[w] : 0;
 			out[w] = (words[w] & site) | park |
 			         (s & ~site & ~park);
+			rep.withheld_bits += static_cast<uint64_t>(
+			    __builtin_popcount(words[w] & ~site & ~park));
+			rep.inferred_cin_x1_bits += static_cast<uint64_t>(
+			    __builtin_popcount(words[w] &
+			                       masks.inferred_cin_x1[w] & ~park));
+			rep.inferred_dsp_reg0_bits += static_cast<uint64_t>(
+			    __builtin_popcount(words[w] &
+			                       masks.inferred_dsp_reg0[w] &
+			                       ~park));
 		}
-		// RECOMPUTE, do not copy. Vivado's pass 1 carries a correct
-		// ECC in 825 of 825 frames in all four measured modules; the
-		// all-ones frames at minors 24/25 look ECC-less only because
-		// the correct ECC of that particular frame happens to be 0.
+		// RECOMPUTE, do not copy -- on block type 0 only. Vivado's
+		// pass 1 carries a correct ECC in 825 of 825 block-0 frames in
+		// every module of both benches; the all-ones frames at minors
+		// 24/25 look ECC-less only because the correct ECC of that
+		// particular frame happens to be 0.
 		xc7series::updateECC(out);
 		pass1.emplace(address, std::move(out));
 	}

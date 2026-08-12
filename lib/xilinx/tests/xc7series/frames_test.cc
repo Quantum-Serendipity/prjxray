@@ -7,6 +7,11 @@
  *
  * SPDX-License-Identifier: ISC
  */
+#include <unistd.h>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -61,4 +66,50 @@ TEST(FramesTest, FillInMissingFrames) {
 	          std::vector<uint32_t>(101, 0xDD));
 	EXPECT_EQ(frames.getFrames().at(test_part_addresses[4]),
 	          std::vector<uint32_t>(101, 0xEE));
+}
+
+// readFrames computes the frame ECC on block type 0 and ONLY on block type 0.
+//
+// Word 50 of a CLB_IO_CLK frame is the frame ECC; word 50 of a BLOCK_RAM frame
+// is block RAM content. Vivado writes no ECC there -- 1,792 of 1,792 BLOCK_RAM
+// frames zero in a full bitstream carrying 30 initialised block RAMs, 772 of
+// 772 zero across both passes of every DFX partial measured. This function used
+// to run updateECC unconditionally, which corrupted 16 frames of live block RAM
+// per module at exit 0. docs/far-double-write-verdict.md sections 5.1 and 9.4.
+TEST(FramesTest, ReadFramesComputesTheEccOnBlockTypeZeroOnly) {
+	// One CLB_IO_CLK and one BLOCK_RAM frame, byte-identical payloads with
+	// word 50 zero, so the ONLY thing that can distinguish the two results
+	// is the block type in the address.
+	const uint32_t clb = static_cast<uint32_t>(xc7series::FrameAddress(
+	    xc7series::BlockType::CLB_IO_CLK, false, 0, 1, 0));
+	const uint32_t bram = static_cast<uint32_t>(xc7series::FrameAddress(
+	    xc7series::BlockType::BLOCK_RAM, false, 0, 1, 0));
+
+	char path[] = "/tmp/prjxray_frames_ecc_XXXXXX";
+	int fd = mkstemp(path);
+	ASSERT_NE(fd, -1);
+	{
+		std::ofstream f(path);
+		for (uint32_t a : {clb, bram}) {
+			f << "0x" << std::hex << a;
+			for (int w = 0; w < 101; ++w)
+				f << (w ? "," : " ") << "0x"
+				  << (w == 0 ? "00000001" : "00000000");
+			f << "\n";
+		}
+	}
+	close(fd);
+
+	Frames<Series7> frames;
+	ASSERT_EQ(frames.readFrames(path), 0);
+	std::remove(path);
+	ASSERT_EQ(frames.getFrames().size(), 2u);
+
+	// icap_ecc(0, 1, 0) is 0x1320 -- prjxray's own unit-test vector -- and
+	// the whole-frame fold at word 100 flips bit 12 for odd parity, so the
+	// frame's ECC is 0x0320. Nonzero either way, which is the point.
+	EXPECT_EQ(frames.getFrames().at(xc7series::FrameAddress(clb))[0x32],
+	          0x0320u);
+	EXPECT_EQ(frames.getFrames().at(xc7series::FrameAddress(bram))[0x32],
+	          0x0u);
 }

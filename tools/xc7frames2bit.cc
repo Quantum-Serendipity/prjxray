@@ -96,10 +96,122 @@ DEFINE_bool(verify,
 DEFINE_uint32(trailing_nops,
               16,
               "NOP words after CMD:DESYNC. 16 in every Vivado golden partial.");
+DEFINE_string(
+    db_root,
+    "",
+    "prjxray-db FAMILY directory -- the one holding segbits_*.db and "
+    "mapping/parts.yaml, e.g. <prjxray-db>/artix7. The FAR double-write "
+    "pre-pass needs it: its SITE mask is per TILE, so it is a function of "
+    "tilegrid.json's tile lattice and of prjxray's own segbits, not of "
+    "(minor, word). Defaults to the grandparent of --part_file, which is that "
+    "directory whenever part.yaml is read from where prjxray-db puts it; "
+    "failing that, $XRAY_DATABASE_DIR/$XRAY_DATABASE.");
+DEFINE_string(tilegrid,
+              "",
+              "Override the tilegrid.json the pre-pass reads. By default it is "
+              "resolved from --part_name through --db_root's own "
+              "mapping/parts.yaml and mapping/devices.yaml, because the PART "
+              "directory (xc7a100tcsg324-1) and the FABRIC directory "
+              "(xc7a100t) are different directories.");
 
 namespace xilinx = prjxray::xilinx;
+namespace xc7series = prjxray::xilinx::xc7series;
 
 namespace {
+
+// The pre-pass geometry, from wherever the caller's flags point. There is NO
+// fallback: a mask that cannot be built from the database is not built at all,
+// because the thing it would fall back to -- SITE as a function of (minor,
+// word) -- is the defect this replaces, and it is wrong precisely in the
+// columns nobody looks at.
+std::unique_ptr<xc7series::PrePassGeometry> LoadPrePassGeometry(
+    std::string* error) {
+	std::string root = FLAGS_db_root;
+	if (root.empty() && !FLAGS_part_file.empty()) {
+		// <db>/<family>/<part>/part.yaml -> <db>/<family>
+		size_t part_dir = FLAGS_part_file.find_last_of('/');
+		if (part_dir != std::string::npos && part_dir > 0) {
+			size_t family =
+			    FLAGS_part_file.find_last_of('/', part_dir - 1);
+			if (family != std::string::npos)
+				root = FLAGS_part_file.substr(0, family);
+		}
+	}
+	if (root.empty()) {
+		const char* dir = getenv("XRAY_DATABASE_DIR");
+		const char* db = getenv("XRAY_DATABASE");
+		if (dir && db)
+			root = std::string(dir) + "/" + db;
+	}
+	if (root.empty()) {
+		*error =
+		    "the FAR double-write pre-pass needs prjxray's database "
+		    "and none of --db_root, --part_file or "
+		    "$XRAY_DATABASE_DIR/$XRAY_DATABASE says where it is.";
+		return nullptr;
+	}
+	if (!FLAGS_tilegrid.empty())
+		return xc7series::PrePassGeometry::Load(FLAGS_tilegrid, root,
+		                                        error);
+	return xc7series::PrePassGeometry::LoadForPart(root, FLAGS_part_name,
+	                                               error);
+}
+
+// What the pre-pass did, on stderr. The two "inferred" lines exist because
+// docs/far-double-write-verdict.md section 5.1 flags two elements of the SITE
+// mask as taken from prjxray by symmetry rather than measured in a bitstream.
+void ReportPrePass(const xilinx::PrePassReport& rep) {
+	std::cerr << "xc7frames2bit: pre-pass " << rep.clb_frames
+	          << " CLB_IO_CLK frame(s) masked, " << rep.verbatim_frames
+	          << " frame(s) of other block types written verbatim; "
+	          << rep.withheld_bits << " pass-2 bit(s) withheld"
+	          << std::endl;
+	if (rep.inferred_cin_x1_bits || rep.inferred_dsp_reg0_bits)
+		std::cerr << "xc7frames2bit: of those, "
+		          << rep.inferred_cin_x1_bits
+		          << " were withheld by the INFERRED SLICE*_X1 "
+		             "PRECYINIT.CIN bit (31_12) and "
+		          << rep.inferred_dsp_reg0_bits
+		          << " by the INFERRED DSP {A,B}REG_0 minor-27 bits. "
+		             "Neither has been seen in a Vivado bitstream; see "
+		             "docs/far-double-write-verdict.md sections 9.2 "
+		             "and 9.3."
+		          << std::endl;
+	if (!rep.columns_without_geometry.empty()) {
+		std::cerr << "xc7frames2bit: WARNING: "
+		          << rep.columns_without_geometry.size()
+		          << " configuration column(s) written have no tile at "
+		             "all in tilegrid.json, so pass 1 withholds ALL of "
+		             "the module's site content there. First:";
+		size_t n = 0;
+		for (uint32_t c : rep.columns_without_geometry) {
+			if (n++ == 4)
+				break;
+			std::cerr << " 0x" << std::hex << std::setw(8)
+			          << std::setfill('0') << c << std::dec;
+		}
+		std::cerr << std::endl;
+	}
+	if (!rep.unclassified_types_touched.empty()) {
+		std::cerr << "xc7frames2bit: NOTE: the frames written cover "
+		             "bit-bearing tile type(s) section 5.1's table does "
+		             "not name and no bench has exercised --";
+		for (const std::string& t : rep.unclassified_types_touched)
+			std::cerr << " " << t;
+		std::cerr << ". They keep nothing, per \"anything else -> "
+		             "nothing\"."
+		          << std::endl;
+	}
+	if (rep.verbatim_frames_with_nonzero_word50)
+		std::cerr << "xc7frames2bit: NOTE: "
+		          << rep.verbatim_frames_with_nonzero_word50
+		          << " non-CLB_IO_CLK frame(s) of the input carry a "
+		             "nonzero word 50. Vivado writes none: word 50 is "
+		             "zero in 772 of 772 BLOCK_RAM frames. Copied "
+		             "through unchanged, as the block-type rule "
+		             "requires."
+		          << std::endl;
+}
 
 // Read the file we just wrote, through the bitstream READER -- a different code
 // path from the writer, which is the whole point -- and check that every frame
@@ -372,12 +484,30 @@ struct Frames2BitWriter {
 						       "--static_frames."
 						    << std::endl;
 					}
+					// SITE is per tile, so the pre-pass is a
+					// function of prjxray's tile lattice.
+					// No geometry, no pre-pass -- there is
+					// no degraded mask to fall back to.
+					std::string geo_error;
+					auto geometry =
+					    LoadPrePassGeometry(&geo_error);
+					if (!geometry)
+						throw std::runtime_error(
+						    "Cannot build the "
+						    "pre-pass SITE mask: " +
+						    geo_error);
+					std::cerr << "xc7frames2bit: "
+					          << geometry->summary()
+					          << std::endl;
+					xilinx::PrePassReport prepass_report;
 					prepass_frames =
 					    xilinx::Configuration<ArchType>::
 					        createPrePassFrames(
 					            frames.getFrames(),
 					            static_frames.getFrames(),
-					            use_static);
+					            use_static, *geometry,
+					            &prepass_report);
+					ReportPrePass(prepass_report);
 					auto prepass_blocks =
 					    xilinx::Configuration<ArchType>::
 					        createPartialPacketData(
