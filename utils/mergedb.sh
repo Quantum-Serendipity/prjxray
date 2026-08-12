@@ -16,9 +16,26 @@ test -e "$2"
 
 tmp1=`mktemp -p .`
 tmp2=`mktemp -p .`
-LOCKFILE="/tmp/segbits_$1.db.lock"
-LOCKTIMEOUT=30 # 30s timeout
+
+# The lock must live on the SAME FILESYSTEM as the database it guards.
+#
+# The previous default was a hard-coded node-local "/tmp/segbits_$1.db.lock"
+# while the database it protects lives under $XRAY_DATABASE_DIR, which on a
+# distributed run is SHARED storage. Two workers on two nodes then take two
+# different locks, both believe they hold it, and perform an unguarded
+# read-modify-write of the same segbits file -- so merges are SILENTLY LOST.
+# Nothing reports it: each worker's mergedb.sh exits 0.
+#
+# Note this was not a missing variable -- LOCKFILE and LOCKTIMEOUT already
+# existed here. They were simply hard-coded, and a plain assignment also means
+# an exported LOCKFILE from the environment was overwritten rather than
+# honoured. Both are now overridable, with a default that sits beside the
+# database rather than beside the process.
+LOCKDIR="$XRAY_DATABASE_DIR/$XRAY_DATABASE"
+LOCKFILE="${LOCKFILE:-$LOCKDIR/.segbits_$1.db.lock}"
+LOCKTIMEOUT="${LOCKTIMEOUT:-30}" # seconds
 LOCKID=222
+mkdir -p "$LOCKDIR"
 
 function finish {
     echo "Cleaning up temp files"
@@ -28,6 +45,80 @@ function finish {
 trap finish EXIT
 
 db=$XRAY_DATABASE_DIR/$XRAY_DATABASE/segbits_$1.db
+
+# --- Vivado version provenance stamp -----------------------------------------
+#
+# This is the ONLY layer that catches a PARTIALLY REBUILT database -- the case
+# where some segbits came from one Vivado version and some from another,
+# because three fuzzers were re-run last month under a different install.
+#
+# Environment gates cannot see that: they check the version of the process that
+# is running now, not the version that produced the bytes already on disk. Only
+# the artefacts can carry that, and upstream's do not -- segdata_*.txt,
+# segbits_*.db and mask_*.db have no provenance field at all.
+#
+# Adopting an existing database that predates this patch: write the stamp by
+# hand from that tree's known provenance, e.g.
+#   echo v2017.2 > "$XRAY_FAMILY_DIR/.vivado-version"
+# An absent stamp is treated as "unknown, adopt it", NOT as a mismatch --
+# otherwise this patch would refuse to merge into every existing checkout.
+#
+# --- WHERE THE VERSION COMES FROM, and why it is derived HERE ---------------
+#
+# The first version of this patch read XRAY_VIVADO_VERSION_VERIFIED and did
+# nothing at all when it was empty. It was ALWAYS empty. utils/genheader.sh
+# exports it, but genheader.sh is sourced by generate.sh, and `pushdb` is a
+# different make recipe in a different process; the variable does not cross
+# that boundary. Measured in Unit 3.1: four merges, four `[ -n '' ]`, zero
+# stamps written. The layer described two paragraphs up as "the ONLY layer that
+# catches a PARTIALLY REBUILT database" had never once fired.
+#
+# The alternative fix was to export the variable from settings/<family>.sh,
+# which is sourced once per campaign and would reach pushdb for free. It is
+# rejected for two reasons, the second decisive:
+#
+#   1. Coverage. A settings export reaches only processes descended from a
+#      shell that sourced settings. It does not reach a hand-run mergedb.sh --
+#      which is how a database gets adopted or repaired -- and it does not
+#      reach a distributed worker that assembled its own environment, which is
+#      exactly the case the LOCKFILE fix above exists for. The stamp needs to
+#      cover every path that can WRITE the database, and that set is defined by
+#      this script, not by who sourced what.
+#   2. It would silently disable the layer above it. genheader.sh's gate is
+#      `if [ -z "${XRAY_VIVADO_VERSION_VERIFIED:-}" ]` -- it SKIPS its own
+#      version check when the variable is already populated. Exporting it at
+#      settings time turns a per-fuzzer re-check into a once-per-campaign
+#      check, which is criticism 3 of the four that the genheader patch was
+#      written to fix. Buying the stamp by breaking the gate above it is a bad
+#      trade.
+#
+# So: honour an inherited value if there is one (free, and it is what
+# genheader.sh exports on the paths that do reach here), otherwise derive it.
+#
+# Cost: `vivado.sh -version` measured at 0.24 s warm on this host, once per
+# mergedb.sh process, against ~229 ${XRAY_MERGEDB} sites across the 42 fuzzers
+# -- ~55 s over a five-family campaign that runs for tens of hours.
+#
+# If no version can be derived at all, say so on stderr rather than silently
+# skipping the stamp: an unwritten stamp is how this guard spent its entire
+# life inert. XRAY_VIVADO_STAMP_REQUIRED=1 turns that into a hard failure, for
+# a CI that wants "the database is always attributed" to be an invariant.
+_stamp="$XRAY_DATABASE_DIR/$XRAY_DATABASE/.vivado-version"
+if [ -z "${XRAY_VIVADO_VERSION_VERIFIED:-}" ] && [ -n "${XRAY_VIVADO:-}" ]; then
+	# `set -e` is on: a failing command substitution in an assignment would
+	# abort the merge, so the failure is absorbed and reported below.
+	XRAY_VIVADO_VERSION_VERIFIED="$(${XRAY_VIVADO} -version 2>/dev/null \
+		| head -1 | cut -d' ' -f2)" || XRAY_VIVADO_VERSION_VERIFIED=""
+fi
+if [ -z "${XRAY_VIVADO_VERSION_VERIFIED:-}" ]; then
+	echo "WARNING: mergedb.sh cannot determine a Vivado version" \
+	     "(XRAY_VIVADO='${XRAY_VIVADO:-<unset>}'); the .vivado-version stamp" \
+	     "will NOT be written and this merge will not be attributed." >&2
+	if [ "${XRAY_VIVADO_STAMP_REQUIRED:-0}" = 1 ]; then
+		echo "FATAL: XRAY_VIVADO_STAMP_REQUIRED=1 and no version is available." >&2
+		exit 5
+	fi
+fi
 
 # if the DB exists acquire a lock
 if [ -f $db ]; then
@@ -39,6 +130,19 @@ if [ -f $db ]; then
 		finish
 		exit 1
 	fi
+fi
+
+# The mismatch check sits AFTER the lock, not before it. In the first version
+# of this patch it was before, so between reading the stamp and taking the lock
+# another worker could land a merge under a different version and this one
+# would never see it -- a race in the check whose entire job is to stop two
+# versions sharing a database.
+if [ -n "${XRAY_VIVADO_VERSION_VERIFIED:-}" ] && [ -e "$_stamp" ] \
+   && [ "$(cat "$_stamp")" != "$XRAY_VIVADO_VERSION_VERIFIED" ]; then
+	echo "FATAL: database at $XRAY_DATABASE_DIR/$XRAY_DATABASE was built with" \
+	     "$(cat "$_stamp"), this process is $XRAY_VIVADO_VERSION_VERIFIED." \
+	     "Refusing to merge: mixing versions corrupts the database silently." >&2
+	exit 4
 fi
 
 # Check existing DB
@@ -316,3 +420,10 @@ else
 fi
 # Check aggregate db for consistency and make canonical
 ${XRAY_PARSEDB} --strict "$tmp2" "$db"
+
+# Record the version that produced this merge. Written AFTER parsedb has
+# accepted the result, and still under the lock taken above (flock is released
+# on script exit), so the stamp never claims a merge that did not land.
+if [ -n "${XRAY_VIVADO_VERSION_VERIFIED:-}" ]; then
+	echo "$XRAY_VIVADO_VERSION_VERIFIED" > "$_stamp"
+fi
