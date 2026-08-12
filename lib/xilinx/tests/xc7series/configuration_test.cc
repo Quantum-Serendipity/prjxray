@@ -18,8 +18,12 @@
 #include <prjxray/xilinx/bitstream_reader.h>
 #include <prjxray/xilinx/configuration.h>
 #include <prjxray/xilinx/configuration_packet.h>
+#include <prjxray/xilinx/configuration_packet_with_payload.h>
 #include <prjxray/xilinx/configuration_register.h>
 #include <prjxray/xilinx/frames.h>
+#include <prjxray/xilinx/nop_packet.h>
+#include <prjxray/xilinx/xc7series/command.h>
+#include <prjxray/xilinx/xc7series/ecc.h>
 #include <yaml-cpp/yaml.h>
 
 using namespace prjxray::xilinx;
@@ -541,7 +545,8 @@ TEST(ConfigurationTest, CreatePartialConfigurationPackage) {
 	    frames, part, 0);
 	Series7::ConfigurationPackage partial_configuration_package;
 	Configuration<Series7>::createPartialConfigurationPackage(
-	    partial_configuration_package, cfg_packets, part);
+	    partial_configuration_package, cfg_packets, part,
+	    PartialStreamOptions());
 
 	std::vector<uint32_t> far_writes;
 	for (auto& cfg : partial_configuration_package) {
@@ -563,4 +568,527 @@ TEST(ConfigurationTest, CreatePartialConfigurationPackage) {
 			fdri_words += cfg->data().size();
 	}
 	EXPECT_EQ(fdri_words, frames.size() * 101);
+}
+
+// ---------------------------------------------------------------------------
+// Unit 6.2: packet-sequence conformance with Vivado, and the FAR double-write
+// pre-pass.
+//
+// The reference for every constant below is the decoded word-level map of
+// Vivado 2025.2's own partial bitstreams for xc7a100tcsg324-1
+// (gateware/vivado-dfx-golden/golden/packets/, reproducible with
+// scripts/u62-packet-map.py) and docs/far-double-write-verdict.md section 5.1.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The command/register sequence of a package, as (register, first data word)
+// with NOPs dropped -- the same reduction scripts/bit-packets.py applies, so
+// the two can be compared by eye against the golden dumps.
+std::vector<std::pair<Series7::ConfRegType, uint32_t>> RegSequence(
+    const Series7::ConfigurationPackage& pkg) {
+	std::vector<std::pair<Series7::ConfRegType, uint32_t>> out;
+	for (auto& p : pkg) {
+		if (p->opcode() !=
+		    ConfigurationPacket<Series7::ConfRegType>::Opcode::Write)
+			continue;
+		out.emplace_back(p->address(),
+		                 p->data().empty() ? 0u : p->data()[0]);
+	}
+	return out;
+}
+
+size_t CountCmd(const Series7::ConfigurationPackage& pkg, uint32_t cmd) {
+	size_t n = 0;
+	for (auto& p : pkg) {
+		if (p->opcode() ==
+		        ConfigurationPacket<Series7::ConfRegType>::Opcode::Write &&
+		    p->address() == Series7::ConfRegType::CMD &&
+		    p->data().size() == 1 && p->data()[0] == cmd)
+			++n;
+	}
+	return n;
+}
+
+size_t CountNops(const Series7::ConfigurationPackage& pkg) {
+	size_t n = 0;
+	for (auto& p : pkg)
+		if (p->opcode() ==
+		    ConfigurationPacket<Series7::ConfRegType>::Opcode::NOP)
+			++n;
+	return n;
+}
+
+std::vector<uint32_t> FarSequence(const Series7::ConfigurationPackage& pkg) {
+	std::vector<uint32_t> out;
+	for (auto& p : pkg)
+		if (p->opcode() ==
+		        ConfigurationPacket<Series7::ConfRegType>::Opcode::Write &&
+		    p->address() == Series7::ConfRegType::FAR &&
+		    !p->data().empty())
+			out.push_back(p->data()[0]);
+	return out;
+}
+
+// A CLB-only frame set spanning the minors the pre-pass treats differently.
+Frames<Series7>::Frames2Data ClbFrames(uint32_t fill,
+                                       const std::vector<int>& minors) {
+	Frames<Series7>::Frames2Data f;
+	for (int m : minors)
+		f.emplace(xc7series::FrameAddress(
+		              xc7series::BlockType::CLB_IO_CLK, false, 0, 0, m),
+		          std::vector<uint32_t>(101, fill));
+	return f;
+}
+
+uint32_t ExpectedEcc(std::vector<uint32_t> frame) {
+	xc7series::updateECC(frame);
+	return frame[0x32];
+}
+
+}  // namespace
+
+// SITE and PARK, per docs/far-double-write-verdict.md section 5.1, on the six
+// minors whose treatment differs. The RM fill is 0xFFFFFFFF and the static is
+// empty, so whatever survives is exactly SITE|PARK.
+TEST(ConfigurationTest, PrePassAppliesSiteAndParkMasks) {
+	auto frames = ClbFrames(0xFFFFFFFF, {0, 1, 2, 17, 24, 25, 30});
+	Frames<Series7>::Frames2Data no_static;
+	auto pass1 = Configuration<Series7>::createPrePassFrames(
+	    frames, no_static, /*have_static=*/false);
+	ASSERT_EQ(pass1.size(), frames.size());
+
+	auto at = [&pass1](int minor) -> const std::vector<uint32_t>& {
+		return pass1.at(xc7series::FrameAddress(
+		    xc7series::BlockType::CLB_IO_CLK, false, 0, 0, minor));
+	};
+	// minor 0: the CLB owns bit index == 0 (mod 4).
+	EXPECT_EQ(at(0)[0], 0x11111111u);
+	// minor 1: bit index == 3 (mod 4).
+	EXPECT_EQ(at(1)[0], 0x88888888u);
+	// minors 2-23 are interconnect: withheld entirely.
+	EXPECT_EQ(at(2)[0], 0x00000000u);
+	EXPECT_EQ(at(17)[0], 0x00000000u);
+	// minors 24-25: the routing-mux selector planes, parked high...
+	EXPECT_EQ(at(24)[0], 0xFFFFFFFFu);
+	EXPECT_EQ(at(24)[100], 0xFFFFFFFFu);
+	EXPECT_EQ(at(25)[0], 0xFFFFFFFFu);
+	// ...except word 50, which belongs to the HCLK tile and carries the ECC.
+	EXPECT_EQ(at(24)[0x32] & 0xFFFFE000u, 0x00000000u);
+	// minors 26-35: the site planes, kept verbatim.
+	EXPECT_EQ(at(30)[0], 0xFFFFFFFFu);
+	// word 50 is dropped at every minor (the ECC field aside).
+	for (int m : {0, 1, 2, 17, 24, 25, 30})
+		EXPECT_EQ(at(m)[0x32] & 0xFFFFE000u, 0x00000000u)
+		    << "minor " << m;
+}
+
+// The ECC is RECOMPUTED for pass 1's own content, not copied from pass 2 and
+// not left zero. Vivado's pass 1 carries a correct ECC in 825 of 825 frames.
+TEST(ConfigurationTest, PrePassRecomputesTheFrameEcc) {
+	// Minor 24 is parked to all-ones; minor 30 keeps a site payload whose
+	// ECC is NOT zero. Two frames with different correct ECCs, so neither a
+	// copied nor a constant ECC can pass.
+	Frames<Series7>::Frames2Data frames;
+	frames.emplace(
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 24),
+	    std::vector<uint32_t>(101, 0xFFFFFFFF));
+	frames.emplace(
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 30),
+	    std::vector<uint32_t>(101, 0x00000001));
+	Frames<Series7>::Frames2Data no_static;
+	auto pass1 = Configuration<Series7>::createPrePassFrames(
+	    frames, no_static, false);
+
+	for (auto& f : pass1) {
+		std::vector<uint32_t> recomputed = f.second;
+		recomputed[0x32] &= 0xFFFFE000u;
+		EXPECT_EQ(f.second[0x32] & 0x1FFFu,
+		          ExpectedEcc(recomputed) & 0x1FFFu)
+		    << "minor " << static_cast<int>(f.first.minor());
+	}
+	const auto& m24 = pass1.at(xc7series::FrameAddress(
+	    xc7series::BlockType::CLB_IO_CLK, false, 0, 0, 24));
+	const auto& m30 = pass1.at(xc7series::FrameAddress(
+	    xc7series::BlockType::CLB_IO_CLK, false, 0, 0, 30));
+	// The parked all-ones frame's correct ECC really is 0 -- which is why
+	// Vivado's word 50 looks blank there and why "it has no ECC" is the
+	// wrong conclusion to draw from it.
+	EXPECT_EQ(m24[0x32] & 0x1FFFu, 0x0u);
+	EXPECT_EQ(m30[0x32] & 0x1FFFu, 0x06A0u);
+}
+
+// The STATIC term. It is what makes the pre-pass constructible, and it is the
+// term that is silently missing if the writer is not given the static design.
+TEST(ConfigurationTest, PrePassKeepsTheStaticsOwnInterconnect) {
+	// RM content at minor 2 (interconnect) and minor 30 (site).
+	auto pass2 = ClbFrames(0x0F0F0F0F, {2, 30});
+	// Static content in the same frames, on disjoint bits.
+	auto stat = ClbFrames(0xF000000F, {2, 30});
+
+	auto with = Configuration<Series7>::createPrePassFrames(pass2, stat,
+	                                                        true);
+	auto without = Configuration<Series7>::createPrePassFrames(
+	    pass2, stat, /*have_static=*/false);
+
+	auto at = [](const Frames<Series7>::Frames2Data& f,
+	             int minor) -> const std::vector<uint32_t>& {
+		return f.at(xc7series::FrameAddress(
+		    xc7series::BlockType::CLB_IO_CLK, false, 0, 0, minor));
+	};
+	// Minor 2 is interconnect: the RM's bits are withheld and the static's
+	// are kept. Withholding the static too is the degradation.
+	EXPECT_EQ(at(with, 2)[0], 0xF000000Fu);
+	EXPECT_EQ(at(without, 2)[0], 0x00000000u);
+	// Minor 30 is a site plane: the RM's bits are kept, and the static's
+	// contribution outside SITE is empty there, so both agree.
+	EXPECT_EQ(at(with, 30)[0], 0x0F0F0F0Fu);
+	EXPECT_EQ(at(without, 30)[0], 0x0F0F0F0Fu);
+}
+
+// Section 5.1 states SITE/PARK over (minor, word) with no block-type term, but
+// it was measured on block type 0 only. Applying PARK to a BLOCK_RAM frame at
+// minor 24/25 would force it to all-ones; the golden's BRAM pass 1 is entirely
+// zero and byte-equal to its pass 2.
+TEST(ConfigurationTest, PrePassLeavesNonClbBlockTypesAlone) {
+	Frames<Series7>::Frames2Data frames;
+	for (int m : {0, 1, 24, 25, 30})
+		frames.emplace(
+		    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM,
+		                            false, 0, 0, m),
+		    std::vector<uint32_t>(101, 0x0));
+	Frames<Series7>::Frames2Data no_static;
+	auto pass1 = Configuration<Series7>::createPrePassFrames(frames,
+	                                                         no_static,
+	                                                         false);
+	ASSERT_EQ(pass1.size(), frames.size());
+	for (auto& f : pass1) {
+		for (size_t w = 0; w < f.second.size(); ++w)
+			ASSERT_EQ(f.second[w], 0x0u)
+			    << "BRAM minor "
+			    << static_cast<int>(f.first.minor()) << " word "
+			    << w;
+	}
+}
+
+// Word 50 is 0 plus the computed ECC, whatever the static holds there. Section
+// 5.1's EXPRESSION says `STATIC[w] | ...`, which would carry the static's
+// HCLK-tile bits and its stale ECC through at w == 50; its own TABLE says
+// "0 + computed ECC", and the goldens agree with the table.
+TEST(ConfigurationTest, PrePassWithholdsWord50FromTheStaticToo) {
+	auto pass2 = ClbFrames(0x0, {2, 17});
+	auto stat = ClbFrames(0xFFFFFFFF, {2, 17});
+	auto pass1 = Configuration<Series7>::createPrePassFrames(pass2, stat,
+	                                                         true);
+	for (auto& f : pass1) {
+		EXPECT_EQ(f.second[0x32] & 0xFFFFE000u, 0x0u)
+		    << "minor " << static_cast<int>(f.first.minor());
+		// ...while every OTHER word of these interconnect minors did
+		// take the static's bits, so this is not passing because the
+		// static was ignored wholesale.
+		EXPECT_EQ(f.second[0], 0xFFFFFFFFu);
+		EXPECT_EQ(f.second[100], 0xFFFFFFFFu);
+	}
+}
+
+// Not characterised anywhere but 7-series, so it must not be guessed.
+TEST(ConfigurationTest, PrePassRefusesOnOtherArchitectures) {
+	Frames<UltraScale>::Frames2Data frames, no_static;
+	EXPECT_THROW(Configuration<UltraScale>::createPrePassFrames(
+	                 frames, no_static, false),
+	             std::runtime_error);
+}
+
+// Unit 6.2 step 2, first half. Vivado emits CMD:WCFG once per FAR block;
+// PR #1492 emitted it once for the whole stream.
+TEST(ConfigurationTest, PartialPackageEmitsWcfgPerFarBlock) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xBC);
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	                                                              part, 0);
+	ASSERT_EQ(blocks.size(), 2u);
+	Series7::ConfigurationPackage pkg;
+	Configuration<Series7>::createPartialConfigurationPackage(
+	    pkg, blocks, part, PartialStreamOptions());
+	EXPECT_EQ(CountCmd(pkg, static_cast<uint32_t>(xc7series::Command::WCFG)),
+	          blocks.size());
+	// 16 trailing NOPs, plus one before RCRC, two after it, and two per
+	// block (after WCFG and after FAR). 16 + 1 + 2 + 2*2 = 23.
+	EXPECT_EQ(CountNops(pkg), 23u);
+	// And no GRESTORE or START anywhere, per the golden.
+	EXPECT_EQ(CountCmd(pkg, 0xA), 0u);  // GRESTORE
+	EXPECT_EQ(CountCmd(pkg, 0x5), 0u);  // START
+	EXPECT_EQ(CountCmd(pkg, 0x3), 0u);  // DGHIGH/LFRM
+}
+
+// Unit 6.2 step 2, second half. The two passes are interleaved A B A B --
+// pass 1 of EVERY block, then pass 2 of every block -- not A A B B. A
+// frame-level comparator is definitionally blind to this difference, so it has
+// to be asserted structurally.
+TEST(ConfigurationTest, PartialPackageInterleavesTheTwoPasses) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xBC);
+	Frames<Series7>::Frames2Data no_static;
+	auto pass1_frames = Configuration<Series7>::createPrePassFrames(
+	    frames, no_static, false);
+
+	auto pass2_blocks =
+	    Configuration<Series7>::createPartialPacketData(frames, part, 0);
+	auto pass1_blocks = Configuration<Series7>::createPartialPacketData(
+	    pass1_frames, part, 0);
+	auto all = pass1_blocks;
+	all.insert(all.end(), pass2_blocks.begin(), pass2_blocks.end());
+
+	Series7::ConfigurationPackage pkg;
+	Configuration<Series7>::createPartialConfigurationPackage(
+	    pkg, all, part, PartialStreamOptions());
+
+	auto fars = FarSequence(pkg);
+	const uint32_t a = Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0);
+	const uint32_t b = Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, 0);
+	// A B A B, then the park FAR.
+	ASSERT_EQ(fars.size(), 5u);
+	EXPECT_EQ(fars[0], a);
+	EXPECT_EQ(fars[1], b);
+	EXPECT_EQ(fars[2], a);
+	EXPECT_EQ(fars[3], b);
+	EXPECT_EQ(fars[4], 0x03be0000u);
+	// ...which is NOT A A B B. Stated as its own assertion so the intent
+	// survives a future edit of the sequence above.
+	EXPECT_FALSE(fars[0] == fars[1] && fars[2] == fars[3]);
+	// One WCFG per emitted block, so four.
+	EXPECT_EQ(CountCmd(pkg, static_cast<uint32_t>(xc7series::Command::WCFG)),
+	          4u);
+	// The two passes carry DIFFERENT payloads at the same FAR: an emitter
+	// that wrote the same block twice would pass every check above.
+	std::vector<absl::Span<const uint32_t>> type2;
+	for (auto& p : pkg)
+		if (p->header_type() == TYPE2)
+			type2.push_back(p->data());
+	ASSERT_EQ(type2.size(), 4u);
+	EXPECT_NE(type2[0][0], type2[2][0]);
+}
+
+// Unit 6.2 step 4. A .bit over JTAG carries IDCODE; a raw ICAP stream does not.
+TEST(ConfigurationTest, PartialPackageOmitsIdcodeInRawMode) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	                                                              part, 0);
+	auto count_idcode = [](const Series7::ConfigurationPackage& pkg) {
+		size_t n = 0;
+		for (auto& p : pkg)
+			if (p->address() == Series7::ConfRegType::IDCODE &&
+			    p->opcode() ==
+			        ConfigurationPacket<
+			            Series7::ConfRegType>::Opcode::Write)
+				++n;
+		return n;
+	};
+
+	PartialStreamOptions jtag;
+	Series7::ConfigurationPackage bit_pkg;
+	Configuration<Series7>::createPartialConfigurationPackage(
+	    bit_pkg, blocks, part, jtag);
+	EXPECT_EQ(count_idcode(bit_pkg), 1u);
+
+	PartialStreamOptions icap;
+	icap.emit_idcode = false;
+	Series7::ConfigurationPackage raw_pkg;
+	Configuration<Series7>::createPartialConfigurationPackage(
+	    raw_pkg, blocks, part, icap);
+	EXPECT_EQ(count_idcode(raw_pkg), 0u);
+	// Exactly one packet fewer, and the CRC differs because the IDCODE
+	// write is accumulated.
+	EXPECT_EQ(raw_pkg.size() + 1, bit_pkg.size());
+}
+
+// Unit 6.2 step 5. Vivado's BITSTREAM.GENERAL.CRC=DISABLE substitutes exactly
+// two 32-bit words per CRC write -- a Type-1 CRC write of the value becomes a
+// Type-1 CMD write of RCRC -- and changes nothing else.
+TEST(ConfigurationTest, PartialPackageCrcDisableIsATwoWordSubstitution) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	                                                              part, 0);
+
+	Series7::ConfigurationPackage with_crc, without_crc;
+	PartialStreamOptions on;
+	PartialStreamOptions off;
+	off.compute_crc = false;
+	Configuration<Series7>::createPartialConfigurationPackage(with_crc,
+	                                                          blocks, part,
+	                                                          on);
+	Configuration<Series7>::createPartialConfigurationPackage(without_crc,
+	                                                          blocks, part,
+	                                                          off);
+
+	ASSERT_EQ(with_crc.size(), without_crc.size());
+	auto a = RegSequence(with_crc), b = RegSequence(without_crc);
+	ASSERT_EQ(a.size(), b.size());
+	size_t differing = 0, at = 0;
+	for (size_t i = 0; i < a.size(); ++i)
+		if (a[i] != b[i]) {
+			++differing;
+			at = i;
+		}
+	ASSERT_EQ(differing, 1u);
+	EXPECT_EQ(a[at].first, Series7::ConfRegType::CRC);
+	EXPECT_EQ(b[at].first, Series7::ConfRegType::CMD);
+	EXPECT_EQ(b[at].second,
+	          static_cast<uint32_t>(xc7series::Command::RCRC));
+	EXPECT_NE(a[at].second, 0u);
+}
+
+// Unit 6.2 step 5, the algorithm itself. The expected value is computed by an
+// independent implementation (scripts/bit-packets.py, whose own CRC is checked
+// against prjxray's crc_test.cc vectors) over the same seven register writes:
+//   IDCODE<=0x1234, CMD<=NULL, MASK<=0x100, CTL0<=0x100, MASK<=0x400,
+//   CTL0<=0x400, FAR<=0x03be0000
+// with the leading CMD:RCRC resetting the accumulator and consuming its own
+// write.
+TEST(ConfigurationTest, StreamCrcMatchesAnIndependentImplementation) {
+	using Reg = Series7::ConfRegType;
+	Series7::ConfigurationPackage pkg;
+	auto w1 = [&pkg](Reg reg, uint32_t v) {
+		pkg.emplace_back(new ConfigurationPacketWithPayload<1, Reg>(
+		    ConfigurationPacket<Reg>::Opcode::Write, reg, {v}));
+	};
+	pkg.emplace_back(new NopPacket<Reg>());
+	w1(Reg::CMD, static_cast<uint32_t>(xc7series::Command::RCRC));
+	pkg.emplace_back(new NopPacket<Reg>());
+	pkg.emplace_back(new NopPacket<Reg>());
+	w1(Reg::IDCODE, 0x1234);
+	w1(Reg::CMD, static_cast<uint32_t>(xc7series::Command::NOP));
+	w1(Reg::MASK, 0x100);
+	w1(Reg::CTL0, 0x100);
+	w1(Reg::MASK, 0x400);
+	w1(Reg::CTL0, 0x400);
+	w1(Reg::FAR, 0x03be0000);
+	EXPECT_EQ(Configuration<Series7>::computeStreamCrc(pkg), 0x1d7601b3u);
+
+	// A write to the CRC register RESETS the accumulator: appending one and
+	// then repeating the same writes must give the same value again.
+	w1(Reg::CRC, 0xDEADBEEF);
+	w1(Reg::IDCODE, 0x1234);
+	w1(Reg::CMD, static_cast<uint32_t>(xc7series::Command::NOP));
+	w1(Reg::MASK, 0x100);
+	w1(Reg::CTL0, 0x100);
+	w1(Reg::MASK, 0x400);
+	w1(Reg::CTL0, 0x400);
+	w1(Reg::FAR, 0x03be0000);
+	EXPECT_EQ(Configuration<Series7>::computeStreamCrc(pkg), 0x1d7601b3u);
+
+	// And CMD:RCRC resets too, so the same again after one.
+	w1(Reg::CMD, static_cast<uint32_t>(xc7series::Command::RCRC));
+	w1(Reg::IDCODE, 0x1234);
+	w1(Reg::CMD, static_cast<uint32_t>(xc7series::Command::NOP));
+	w1(Reg::MASK, 0x100);
+	w1(Reg::CTL0, 0x100);
+	w1(Reg::MASK, 0x400);
+	w1(Reg::CTL0, 0x400);
+	w1(Reg::FAR, 0x03be0000);
+	EXPECT_EQ(Configuration<Series7>::computeStreamCrc(pkg), 0x1d7601b3u);
+}
+
+// Unit 6.2 step 3. MASK/CTL0 appear THREE times, in PR #1492's exact triple,
+// which the golden confirms: two pairs in the prologue (0x100/0x100 asserting
+// GLUTMASK_B, then 0x400/0x400) and one in the epilogue (0x100/0x000). The
+// prior corpus said they were "typically omitted".
+TEST(ConfigurationTest, PartialPackageEmitsTheMaskCtl0Triple) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	                                                              part, 0);
+	Series7::ConfigurationPackage pkg;
+	Configuration<Series7>::createPartialConfigurationPackage(
+	    pkg, blocks, part, PartialStreamOptions());
+
+	std::vector<std::pair<Series7::ConfRegType, uint32_t>> pairs;
+	for (auto& e : RegSequence(pkg))
+		if (e.first == Series7::ConfRegType::MASK ||
+		    e.first == Series7::ConfRegType::CTL0)
+			pairs.push_back(e);
+	ASSERT_EQ(pairs.size(), 6u);
+	EXPECT_EQ(pairs[0], std::make_pair(Series7::ConfRegType::MASK, 0x100u));
+	EXPECT_EQ(pairs[1], std::make_pair(Series7::ConfRegType::CTL0, 0x100u));
+	EXPECT_EQ(pairs[2], std::make_pair(Series7::ConfRegType::MASK, 0x400u));
+	EXPECT_EQ(pairs[3], std::make_pair(Series7::ConfRegType::CTL0, 0x400u));
+	EXPECT_EQ(pairs[4], std::make_pair(Series7::ConfRegType::MASK, 0x100u));
+	EXPECT_EQ(pairs[5], std::make_pair(Series7::ConfRegType::CTL0, 0x0u));
+
+	// The whole command/register sequence, in order, against the golden's.
+	auto seq = RegSequence(pkg);
+	using Reg = Series7::ConfRegType;
+	std::vector<std::pair<Reg, uint32_t>> want{
+	    {Reg::CMD, static_cast<uint32_t>(xc7series::Command::RCRC)},
+	    {Reg::IDCODE, 0x1234},
+	    {Reg::CMD, static_cast<uint32_t>(xc7series::Command::NOP)},
+	    {Reg::MASK, 0x100},
+	    {Reg::CTL0, 0x100},
+	    {Reg::MASK, 0x400},
+	    {Reg::CTL0, 0x400},
+	    {Reg::CMD, static_cast<uint32_t>(xc7series::Command::WCFG)},
+	    {Reg::FAR, Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0)},
+	    {Reg::FDRI, 0},
+	    {Reg::FDRI, 0xAB},
+	    {Reg::MASK, 0x100},
+	    {Reg::CTL0, 0x0},
+	    {Reg::FAR, 0x03be0000},
+	};
+	ASSERT_GE(seq.size(), want.size() + 2);
+	for (size_t i = 0; i < want.size(); ++i) {
+		EXPECT_EQ(seq[i].first, want[i].first) << "at " << i;
+		EXPECT_EQ(seq[i].second, want[i].second) << "at " << i;
+	}
+	EXPECT_EQ(seq[want.size()].first, Reg::CRC);
+	EXPECT_EQ(seq[want.size() + 1].first, Reg::CMD);
+	EXPECT_EQ(seq[want.size() + 1].second,
+	          static_cast<uint32_t>(xc7series::Command::DESYNC));
+	EXPECT_EQ(seq.size(), want.size() + 2);
+}
+
+// The trailing NOP count. 16 in every golden partial; PR #1492 emitted 400.
+TEST(ConfigurationTest, PartialPackageEndsWithSixteenNops) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 4; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	                                                              part, 0);
+	Series7::ConfigurationPackage pkg;
+	Configuration<Series7>::createPartialConfigurationPackage(
+	    pkg, blocks, part, PartialStreamOptions());
+	size_t trailing = 0;
+	for (auto it = pkg.rbegin(); it != pkg.rend(); ++it) {
+		if ((*it)->opcode() !=
+		    ConfigurationPacket<Series7::ConfRegType>::Opcode::NOP)
+			break;
+		++trailing;
+	}
+	EXPECT_EQ(trailing, 16u);
 }

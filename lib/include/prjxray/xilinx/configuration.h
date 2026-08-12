@@ -28,6 +28,27 @@
 namespace prjxray {
 namespace xilinx {
 
+// Knobs on the emitted partial-bitstream packet stream. Every default is the
+// value measured in Vivado 2025.2's own 7-series partial bitstreams
+// (gateware/vivado-dfx-golden/golden/packets/rm_*_partial.packets.txt); see
+// docs/partial-bitstream.md for the word-level map they were read from.
+struct PartialStreamOptions {
+	// A .bit loaded over JTAG carries an IDCODE write; a raw stream fed to
+	// the ICAP does not. False is --raw.
+	bool emit_idcode = true;
+
+	// True: compute the stream CRC and write it to the CRC register.
+	// False: substitute a CMD:RCRC write in its place, which is exactly
+	// what Vivado's BITSTREAM.GENERAL.CRC=DISABLE does -- measured against
+	// the crcdisable goldens, the two streams differ in exactly two 32-bit
+	// words per CRC write (0x30000001,<crc> -> 0x30008001,0x00000007) and
+	// in nothing else. A substitution, not a second code path.
+	bool compute_crc = true;
+
+	// NOPs after CMD:DESYNC. 16 in every golden partial.
+	unsigned int trailing_nops = 16;
+};
+
 template <typename ArchType>
 class Configuration {
        public:
@@ -104,6 +125,59 @@ class Configuration {
 	    absl::optional<typename ArchType::Part>& part,
 	    unsigned int pad_frames);
 
+	// Builds the FAR double write's FIRST pass from the caller's frames.
+	//
+	// A 7-series partial bitstream written by Vivado writes every FAR block
+	// TWICE, with different payloads, and the two passes are interleaved
+	// A B A B -- pass 1 of every block, then pass 2 of every block. Pass 2
+	// is the configuration; pass 1 is the same region with the interconnect
+	// withheld. `pass2` here is the caller's .frm, which for a DFX writer
+	// is already STATIC | RM.
+	//
+	// The rule, from docs/far-double-write-verdict.md section 5.1 (measured
+	// against Vivado 2025.2 on xc7a100tcsg324-1, four reconfigurable
+	// modules):
+	//
+	//   pass1[w] = STATIC[w] | (RM[w] & SITE(m,w)) | PARK(m,w)
+	//
+	// and equivalently, for a writer that holds pass 2 rather than the RM,
+	//
+	//   pass1[w] = (pass2[w] & SITE) | PARK | (STATIC[w] & ~SITE & ~PARK)
+	//
+	// then the frame ECC recomputed. `static_frames` supplies STATIC. It is
+	// NOT recoverable from pass 2 -- the union has destroyed each bit's
+	// provenance -- which is why it is a separate input; see
+	// docs/partial-bitstream.md. When `have_static` is false the STATIC
+	// term is dropped, which is wrong in exactly the bits that carry the
+	// static's own routing inside the region (84 bits in 67 words in the
+	// measured golden), so the tool must not do that silently.
+	//
+	// BLOCK TYPE. Section 5.1 states SITE/PARK over (minor, word) with no
+	// block-type term, but the measurement behind it covered block type 0
+	// (CLB_IO_CLK) only. Block type 1 (BLOCK_RAM) also has minors 24 and
+	// 25, and applying PARK there forces whole BRAM frames to all-ones --
+	// six of them in the measured golden, whose BRAM pass 1 is in fact
+	// entirely zero and byte-equal to its pass 2. So the transformation is
+	// applied to CLB_IO_CLK frames only and every other block type is
+	// carried through from pass 2 unchanged. That reproduces the golden in
+	// 1209 of 1209 frames; the literal reading reproduces 1203.
+	static typename Frames<ArchType>::Frames2Data createPrePassFrames(
+	    const typename Frames<ArchType>::Frames2Data& pass2,
+	    const typename Frames<ArchType>::Frames2Data& static_frames,
+	    bool have_static);
+
+	// The bitstream CRC over an already-built configuration package, up to
+	// but not including the CRC write itself.
+	//
+	// Reflected CRC-32C, polynomial 0x82F63B78, fed data[31:0] LSB-first
+	// then addr[4:0] LSB-first (prjxray xc7series/crc.h). Every register
+	// write is accumulated except a write to the CRC register; CMD:RCRC
+	// resets the accumulator and its own write is consumed by the reset.
+	// IEEE 802.3 is refuted: it reproduces none of the six vendor values.
+	// See docs/vivado-dfx-oracle.md section 3.
+	static uint32_t computeStreamCrc(
+	    const typename ArchType::ConfigurationPackage& packets);
+
 	// Creates the configuration package for partial configuration
 	// which is later on used by the bitstream writer to generate
 	// the partial bitstream file.
@@ -116,10 +190,15 @@ class Configuration {
 	// heap -- confirmed by AddressSanitizer, and the same defect class as
 	// the bitread span-lifetime crash. Same fix as there: the owner lives
 	// in the caller's scope, not in a scope that ends first.
+	//
+	// To emit the FAR double write, pass the concatenation of pass 1's
+	// blocks and pass 2's blocks: the per-block emission is identical, so
+	// concatenation IS the A B A B interleave.
 	static void createPartialConfigurationPackage(
 	    typename ArchType::ConfigurationPackage& out_packets,
 	    const PartialPacketData& cfg_packets,
-	    absl::optional<typename ArchType::Part>& part);
+	    absl::optional<typename ArchType::Part>& part,
+	    const PartialStreamOptions& options);
 
 	// Returns the payload for a type 2 packet
 	// which allows for bigger payload compared to type 1.
@@ -194,25 +273,63 @@ template <>
 void Configuration<Spartan6>::createPartialConfigurationPackage(
     Spartan6::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<Spartan6::Part>& part);
+    absl::optional<Spartan6::Part>& part,
+    const PartialStreamOptions& options);
 
 template <>
 void Configuration<Series7>::createPartialConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<Series7::Part>& part);
+    absl::optional<Series7::Part>& part,
+    const PartialStreamOptions& options);
 
 template <>
 void Configuration<UltraScale>::createPartialConfigurationPackage(
     UltraScale::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<UltraScale::Part>& part);
+    absl::optional<UltraScale::Part>& part,
+    const PartialStreamOptions& options);
 
 template <>
 void Configuration<UltraScalePlus>::createPartialConfigurationPackage(
     UltraScalePlus::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<UltraScalePlus::Part>& part);
+    absl::optional<UltraScalePlus::Part>& part,
+    const PartialStreamOptions& options);
+
+// The pre-pass and the stream CRC are 7-series only: both are measured on
+// xc7a100tcsg324-1 and neither has been characterised anywhere else. The
+// primary templates below throw, so an unsupported architecture fails loudly
+// rather than emitting a plausible-looking guess.
+template <>
+Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
+    const Frames<Series7>::Frames2Data& pass2,
+    const Frames<Series7>::Frames2Data& static_frames,
+    bool have_static);
+
+template <>
+uint32_t Configuration<Series7>::computeStreamCrc(
+    const Series7::ConfigurationPackage& packets);
+
+template <typename ArchType>
+typename Frames<ArchType>::Frames2Data
+Configuration<ArchType>::createPrePassFrames(
+    const typename Frames<ArchType>::Frames2Data& pass2,
+    const typename Frames<ArchType>::Frames2Data& static_frames,
+    bool have_static) {
+	throw std::runtime_error(
+	    "The FAR double-write pre-pass is characterised for 7-series only. "
+	    "docs/far-double-write-verdict.md section 6 records what was not "
+	    "tested; guessing it for another architecture would emit a "
+	    "structurally wrong partial bitstream at exit 0.");
+}
+
+template <typename ArchType>
+uint32_t Configuration<ArchType>::computeStreamCrc(
+    const typename ArchType::ConfigurationPackage& packets) {
+	throw std::runtime_error(
+	    "The bitstream CRC model is measured for 7-series only.");
+}
 
 template <typename ArchType>
 typename Configuration<ArchType>::PacketData

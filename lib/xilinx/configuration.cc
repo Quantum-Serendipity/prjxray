@@ -23,6 +23,8 @@
 #include <prjxray/xilinx/spartan6/command.h>
 #include <prjxray/xilinx/xc7series/command.h>
 #include <prjxray/xilinx/xc7series/configuration_options_0_value.h>
+#include <prjxray/xilinx/xc7series/crc.h>
+#include <prjxray/xilinx/xc7series/ecc.h>
 
 namespace prjxray {
 namespace xilinx {
@@ -51,7 +53,8 @@ template <>
 void Configuration<Spartan6>::createPartialConfigurationPackage(
     Spartan6::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<Spartan6::Part>& part) {
+    absl::optional<Spartan6::Part>& part,
+    const PartialStreamOptions& options) {
 	throw std::runtime_error(
 	    "Partial bitstream generation for this architecture is not "
 	    "supported!");
@@ -307,71 +310,202 @@ void Configuration<Spartan6>::createConfigurationPackage(
 	}
 }
 
+// ---------------------------------------------------------------- pre-pass --
+//
+// docs/far-double-write-verdict.md section 5.1. See the declaration in
+// configuration.h for the rule and for why the block-type restriction below is
+// there even though section 5.1 does not state one.
+namespace {
+
+constexpr size_t kEccWord = 0x32;
+
+// The bit positions a SITE tile owns -- what pass 1 keeps of the RM.
+uint32_t SiteMask(uint8_t minor, size_t word) {
+	if (word == kEccWord)
+		return 0;  // word 50 belongs to the HCLK tile alone
+	if (minor == 0)
+		return 0x11111111;  // CLB owns bit index == 0 (mod 4)
+	if (minor == 1)
+		return 0x88888888;  // CLB owns bit index == 3 (mod 4)
+	if (minor >= 26 && minor <= 35)
+		return 0xFFFFFFFF;  // the CLB planes, in full
+	return 0;               // minors 2-25 are interconnect
+}
+
+// The fixed selector code pass 1 writes over the routing-mux planes. prjxray's
+// INT_[LR] site-input muxes are five-bit codes spanning minors 21-25 at a
+// single bit index, so this is ONE park of the selector group, not "blank
+// 16-23 and force 24-25 high" -- those read as two effects and are one.
+uint32_t ParkMask(uint8_t minor, size_t word) {
+	if (minor >= 24 && minor <= 25 && word != kEccWord)
+		return 0xFFFFFFFF;
+	return 0;
+}
+
+}  // namespace
+
+template <>
+Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
+    const Frames<Series7>::Frames2Data& pass2,
+    const Frames<Series7>::Frames2Data& static_frames,
+    bool have_static) {
+	Frames<Series7>::Frames2Data pass1;
+	const std::vector<uint32_t> kZeroFrame(Series7::words_per_frame, 0);
+
+	for (const auto& frame : pass2) {
+		const xc7series::FrameAddress address = frame.first;
+		const auto& words = frame.second;
+
+		// Every other block type is carried through unchanged. The
+		// recipe is measured on CLB_IO_CLK frames; PARK applied to a
+		// BLOCK_RAM frame at minor 24/25 would force it to all-ones,
+		// and the golden's BRAM pass 1 is zero.
+		if (address.block_type() != xc7series::BlockType::CLB_IO_CLK ||
+		    words.size() != Series7::words_per_frame) {
+			pass1.emplace(address, words);
+			continue;
+		}
+
+		const auto it = static_frames.find(address);
+		const std::vector<uint32_t>& stat =
+		    (have_static && it != static_frames.end()) ? it->second
+		                                              : kZeroFrame;
+		const bool stat_ok = stat.size() == Series7::words_per_frame;
+
+		std::vector<uint32_t> out(Series7::words_per_frame, 0);
+		const uint8_t minor = address.minor();
+		for (size_t w = 0; w < Series7::words_per_frame; ++w) {
+			// Word 50 is 0 plus the computed ECC, at every minor
+			// and whatever the static holds there. Section 5.1's
+			// expression reads `STATIC[w] | ...`, which at w == 50
+			// would carry the static's HCLK-tile bits (indices
+			// 14-31) and its stale ECC straight through; its own
+			// table row says word 50 -> "0 + computed ECC", and the
+			// table is what the goldens show. Measured: across all
+			// four modules, pass 1 has ZERO frames with word-50
+			// bits 31:13 set, while pass 2 has 3, 3, 3 and 15. So
+			// the withholding is unconditional and the expression,
+			// read literally, is wrong here.
+			if (w == kEccWord)
+				continue;  // out[w] is already 0
+			const uint32_t site = SiteMask(minor, w);
+			const uint32_t park = ParkMask(minor, w);
+			const uint32_t s = stat_ok ? stat[w] : 0;
+			out[w] = (words[w] & site) | park |
+			         (s & ~site & ~park);
+		}
+		// RECOMPUTE, do not copy. Vivado's pass 1 carries a correct
+		// ECC in 825 of 825 frames in all four measured modules; the
+		// all-ones frames at minors 24/25 look ECC-less only because
+		// the correct ECC of that particular frame happens to be 0.
+		xc7series::updateECC(out);
+		pass1.emplace(address, std::move(out));
+	}
+	return pass1;
+}
+
+// --------------------------------------------------------------- stream CRC --
+
+template <>
+uint32_t Configuration<Series7>::computeStreamCrc(
+    const Series7::ConfigurationPackage& packets) {
+	using ConfigurationRegister = Series7::ConfRegType;
+	uint32_t crc = 0;
+	for (const auto& packet : packets) {
+		if (packet->opcode() !=
+		    ConfigurationPacket<ConfigurationRegister>::Opcode::Write)
+			continue;
+		const ConfigurationRegister reg = packet->address();
+		// A write to the CRC register resets the accumulator (2/2 on
+		// the full bitstream's two CRC writes, 1/2 without).
+		if (reg == ConfigurationRegister::CRC) {
+			crc = 0;
+			continue;
+		}
+		// CMD:RCRC accumulates its own write and THEN resets, which is
+		// the same final value as "reset and consume the write" and is
+		// NOT the same as resetting first: 6/6 vendor values this way,
+		// 1/6 the other.
+		if (reg == ConfigurationRegister::CMD &&
+		    packet->data().size() == 1 &&
+		    packet->data()[0] ==
+		        static_cast<uint32_t>(xc7series::Command::RCRC)) {
+			crc = 0;
+			continue;
+		}
+		for (uint32_t word : packet->data())
+			crc = xc7series::icap_crc(static_cast<uint32_t>(reg),
+			                          word, crc);
+	}
+	return crc;
+}
+
 template <>
 void Configuration<Series7>::createPartialConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<Series7::Part>& part) {
+    absl::optional<Series7::Part>& part,
+    const PartialStreamOptions& options) {
 	using ArchType = Series7;
 	using ConfigurationRegister = ArchType::ConfRegType;
-	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::RCRC)}));
-	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
-	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
-
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::IDCODE, {part->idcode()}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::NOP)}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::MASK, {0x100}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CTL0, {0x100}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::MASK, {0x400}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CTL0, {0x400}));
-
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::WCFG)}));
-	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
-
-	// One FAR + FDRI block per run of consecutive frames. cfg_packets is a
-	// const reference into the caller's storage and the spans below point
-	// straight at it: it MUST outlive out_packets. See the declaration.
-	//
-	// Per UG470 the command in CMD is re-executed on every FAR write, so
-	// the single WCFG above covers all of these blocks. Vivado emits a
-	// WCFG per block instead; that divergence is Unit 6.2's, not this
-	// unit's, and is deliberately left alone here.
-	for (auto& block : cfg_packets) {
-		out_packets.emplace_back(new ConfigurationPacketWithPayload<
-		                         1, ConfigurationRegister>(
-		    ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-		    ConfigurationRegister::FAR, {block.first}));
+	auto write1 = [&out_packets](ConfigurationRegister reg, uint32_t value) {
 		out_packets.emplace_back(
-		    new NopPacket<ConfigurationRegister>());
+		    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
+		        ConfigurationPacket<ConfigurationRegister>::Opcode::
+		            Write,
+		        reg, {value}));
+	};
+	auto nop = [&out_packets]() {
+		out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
+	};
 
+	// The word-for-word target is Vivado 2025.2's own stream; see
+	// docs/partial-bitstream.md for the map this was written from, and
+	// scripts/u62-packet-map.py to reproduce it.
+	nop();
+	write1(ConfigurationRegister::CMD,
+	       static_cast<uint32_t>(xc7series::Command::RCRC));
+	nop();
+	nop();
+
+	// A .bit loaded over JTAG carries IDCODE; a raw ICAP stream does not.
+	if (options.emit_idcode)
+		write1(ConfigurationRegister::IDCODE, part->idcode());
+
+	write1(ConfigurationRegister::CMD,
+	       static_cast<uint32_t>(xc7series::Command::NOP));
+	// MASK/CTL0 in PR #1492's exact triple, which is Vivado's: two pairs
+	// here (0x100/0x100 asserting GLUTMASK_B, then 0x400/0x400) and one
+	// pair in the epilogue. The prior corpus said these were "typically
+	// omitted"; the golden refutes that.
+	write1(ConfigurationRegister::MASK, 0x100);
+	write1(ConfigurationRegister::CTL0, 0x100);
+	write1(ConfigurationRegister::MASK, 0x400);
+	write1(ConfigurationRegister::CTL0, 0x400);
+
+	// One WCFG + FAR + FDRI block per run of consecutive frames.
+	// cfg_packets is a const reference into the caller's storage and the
+	// spans below point straight at it: it MUST outlive out_packets.
+	//
+	// WCFG IS PER BLOCK. Per UG470 the command in CMD is re-executed on
+	// every FAR write, so a single WCFG up front would also work on the
+	// device -- but Vivado writes one per block and this stream is meant to
+	// match it. That was PR #1492's one real divergence.
+	//
+	// To emit the FAR double write, the caller passes pass 1's blocks
+	// followed by pass 2's. The order that produces is A B A B -- pass 1 of
+	// every block, then pass 2 of every block -- which is Vivado's, and is
+	// NOT the A A B B a "write each block twice" reading suggests.
+	for (auto& block : cfg_packets) {
+		write1(ConfigurationRegister::CMD,
+		       static_cast<uint32_t>(xc7series::Command::WCFG));
+		nop();
+		write1(ConfigurationRegister::FAR, block.first);
+		nop();
+		// The standard type1-then-type2 idiom for a payload over 2047
+		// words: a Type-1 FDRI write of length ZERO selects the
+		// register, and the Type-2 packet that follows inherits it and
+		// carries the words.
 		out_packets.emplace_back(new ConfigurationPacket<
 		                         ConfigurationRegister>(
 		    TYPE1,
@@ -384,15 +518,9 @@ void Configuration<Series7>::createPartialConfigurationPackage(
 		    ConfigurationRegister::FDRI, block.second));
 	}
 
-	// Finalization sequence
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::MASK, {0x100}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CTL0, {0x0}));
+	// Finalization sequence. GLUTMASK_B deasserted.
+	write1(ConfigurationRegister::MASK, 0x100);
+	write1(ConfigurationRegister::CTL0, 0x0);
 	// DO NOT "fix" this address. 0x03be0000 decodes to block_type = 7
 	// (FAR bits 25:23), which is RESERVED on every 7-series part, so this
 	// parks the frame-address register where no frame lives. It was
@@ -401,26 +529,25 @@ void Configuration<Series7>::createPartialConfigurationPackage(
 	// bitstreams: docs/far-double-write-verdict.md section 2 decodes it
 	// straight out of a Vivado 2025.2 partial for xc7a100tcsg324-1 as
 	//     FAR    =  0x03be0000  (blk7 tb0 row31 col0 minor0)
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::FAR, {0x3be0000}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::RCRC)}));
-	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
-	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::DESYNC)}));
-	for (int ii = 0; ii < 400; ++ii) {
-		out_packets.emplace_back(
-		    new NopPacket<ConfigurationRegister>());
+	write1(ConfigurationRegister::FAR, 0x3be0000);
+
+	// The CRC write, or the two-word substitution that replaces it.
+	// EVERYTHING accumulated is already in out_packets at this point and
+	// nothing after this line is accumulated, so the CRC is computed over
+	// exactly the words that precede it -- which is what the register
+	// means.
+	if (options.compute_crc) {
+		write1(ConfigurationRegister::CRC,
+		       Configuration<Series7>::computeStreamCrc(out_packets));
+	} else {
+		write1(ConfigurationRegister::CMD,
+		       static_cast<uint32_t>(xc7series::Command::RCRC));
 	}
+
+	write1(ConfigurationRegister::CMD,
+	       static_cast<uint32_t>(xc7series::Command::DESYNC));
+	for (unsigned int ii = 0; ii < options.trailing_nops; ++ii)
+		nop();
 }
 
 template <>
@@ -599,7 +726,8 @@ template <>
 void Configuration<UltraScale>::createPartialConfigurationPackage(
     UltraScale::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<UltraScale::Part>& part) {
+    absl::optional<UltraScale::Part>& part,
+    const PartialStreamOptions& options) {
 	throw std::runtime_error(
 	    "Partial bitstream generation for this architecture is not "
 	    "supported!");
@@ -770,7 +898,8 @@ template <>
 void Configuration<UltraScalePlus>::createPartialConfigurationPackage(
     UltraScalePlus::ConfigurationPackage& out_packets,
     const PartialPacketData& cfg_packets,
-    absl::optional<UltraScalePlus::Part>& part) {
+    absl::optional<UltraScalePlus::Part>& part,
+    const PartialStreamOptions& options) {
 	throw std::runtime_error(
 	    "Partial bitstream generation for this architecture is not "
 	    "supported!");
