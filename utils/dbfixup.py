@@ -233,8 +233,33 @@ def read_segbits(fn_in):
     return lines
 
 
+def mode_reason(mode):
+    """segmatch's line annotation -> a one-word reason, for the summary.
+
+    The annotations are produced by tools/segmatch.cc: `<const0>` when the tag
+    was never 1 (count1 == 0), `<const1>` when it was never 0 (count0 == 0, the
+    presence-bit case), `<N candidates>` when the solution did not narrow to
+    within -c, and `<m1 N>`/`<m0 N>`/`<M a b>` when it fell under -m/-M.
+    """
+    m = re.match(r'<(const[01]|always)>', mode)
+    if m:
+        return m.group(1)
+    if re.match(r'<\d+ candidates>', mode):
+        return "candidates"
+    m = re.match(r'<(m0|m1|M) ', mode)
+    if m:
+        return "under-" + m.group(1)
+    return "mode"
+
+
 def add_zero_bits(
-        fn_in, lines, zero_db, clb_int=False, strict=True, verbose=False):
+        fn_in,
+        lines,
+        zero_db,
+        clb_int=False,
+        strict=True,
+        verbose=False,
+        unresolved=None):
     '''
     Add multibit entries
     This requires adding some zero bits (ex: !31_09)
@@ -247,6 +272,16 @@ def add_zero_bits(
     changes = 0
 
     drops = 0
+
+    def dropped(reason, line):
+        # --unresolved-out: keep the line instead of losing it.  Every drop
+        # below is a tag segmatch could not solve, and the reason it could not
+        # is usually structural (count0 == 0 -> <const1>) rather than a
+        # shortage of specimens -- so these lines are the input to the next
+        # specimen design, not noise.  Without this they only ever appeared as
+        # a count.
+        if unresolved is not None:
+            unresolved.append((fn_in, reason, line))
 
     for line in lines:
 
@@ -264,6 +299,7 @@ def add_zero_bits(
         # check below asserts that a mask was actually applied
         if mode and mode != "<0 candidates>" and not strict:
             verbose and print("WARNING: dropping unresolved line: %s" % line)
+            dropped(mode_reason(mode), line)
             drops += 1
             continue
 
@@ -292,6 +328,7 @@ def add_zero_bits(
                     verbose and print(
                         "WARNING: dropping line with %d bits, not [2, 4]: %s, %s"
                         % (len(set_bits), bits, line))
+                    dropped("clb-int-bitcount", line)
                     drops += 1
                     continue
 
@@ -303,6 +340,7 @@ def add_zero_bits(
             elif len(bits) == 0:
                 verbose and print(
                     "WARNING: dropping unresolved line: %s" % line)
+                dropped("no-bits", line)
                 drops += 1
                 continue
 
@@ -373,7 +411,8 @@ def load_zero_db(fn):
     return ret
 
 
-def remove_ambiguous_solutions(fn_in, db_lines, strict=True, verbose=True):
+def remove_ambiguous_solutions(
+        fn_in, db_lines, strict=True, verbose=True, unresolved=None):
     """ Removes features with identical solutions.
 
     During solving, some tags may be tightly coupled and solve to the same
@@ -412,6 +451,8 @@ def remove_ambiguous_solutions(fn_in, db_lines, strict=True, verbose=True):
             output_lines.add(l)
             drops += 1
         else:
+            if unresolved is not None:
+                unresolved.append((fn_in, "duplicate-solution", l))
             if verbose:
                 print(
                     "WARNING: dropping line due to duplicate solution: %s" % l)
@@ -521,8 +562,10 @@ def update_seg_fns(
         clb_int,
         lazy=False,
         strict=True,
-        verbose=False):
+        verbose=False,
+        unresolved_out=None):
 
+    unresolved = [] if unresolved_out else None
     seg_files = 0
     seg_lines = 0
     for fn_in, fn_out in fn_inouts:
@@ -546,7 +589,8 @@ def update_seg_fns(
             zero_db,
             clb_int=clb_int,
             strict=strict,
-            verbose=verbose)
+            verbose=verbose,
+            unresolved=unresolved)
         changes += new_changes
 
         new_changes, lines = remove_ambiguous_solutions(
@@ -554,6 +598,7 @@ def update_seg_fns(
             lines,
             strict=strict,
             verbose=verbose,
+            unresolved=unresolved,
         )
         changes += new_changes
 
@@ -567,6 +612,24 @@ def update_seg_fns(
     print(
         "Segbit: checked %u files w/ %u changed lines" %
         (seg_files, seg_lines))
+
+    if unresolved_out:
+        # The file holds the ORIGINAL segmatch line, verbatim and unannotated,
+        # so it stays in the .rdb format its consumers already parse and so the
+        # `<const1> <bits...>` candidate list -- the thing that says which bits
+        # a presence-blind tag is hiding in -- survives.  The reasons go to
+        # stdout, where they cost nothing to read and nothing to parse around.
+        with util.OpenSafeFile(unresolved_out, "w") as f:
+            for line in sorted(set(l for _, _, l in unresolved)):
+                print(line, file=f)
+        by_reason = {}
+        for _, reason, _ in unresolved:
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        print(
+            "Unresolved: %u line(s) written to %s (%s)" %
+            (len(unresolved), unresolved_out, ", ".join(
+                "%s=%u" % kv for kv in sorted(by_reason.items()))
+             or "none"))
 
 
 def update_masks(db_root):
@@ -604,7 +667,8 @@ def update_segs(
         zero_db_fn,
         tag_groups,
         strict=True,
-        verbose=False):
+        verbose=False,
+        unresolved_out=None):
     if clb_int:
         zero_db = clb_int_zero_db
         lazy = True
@@ -635,7 +699,8 @@ def update_segs(
         clb_int,
         lazy=lazy,
         strict=strict,
-        verbose=verbose)
+        verbose=verbose,
+        unresolved_out=unresolved_out)
 
 
 def find_common_bits_for_tag_groups(lines, tag_groups):
@@ -705,7 +770,8 @@ def run(
         seg_fn_out=None,
         groups_fn_in=None,
         strict=None,
-        verbose=False):
+        verbose=False,
+        unresolved_out=None):
 
     if strict is None:
         strict = not clb_int
@@ -724,7 +790,8 @@ def run(
         zero_db_fn=zero_db_fn,
         tag_groups=tag_groups,
         strict=strict,
-        verbose=verbose)
+        verbose=verbose,
+        unresolved_out=unresolved_out)
     if clb_int:
         update_masks(db_root)
 
@@ -749,6 +816,17 @@ def main():
         type=str,
         default=None,
         help="Input tag group definition file")
+    parser.add_argument(
+        "--unresolved-out",
+        type=str,
+        default=None,
+        help="Write every line this run DROPS to this file, verbatim, instead "
+        "of losing it. --strict defaults to False, and in that mode "
+        "<const0>/<const1>/<N candidates> lines and lines that solved to no "
+        "bits are discarded with only a count to show for it. A <const1> "
+        "line is a tag whose presence never varied across the specimen set "
+        "-- the enable-bit case -- and its candidate list is the input to "
+        "the next specimen design.")
 
     args = parser.parse_args()
 
@@ -760,7 +838,8 @@ def main():
         args.seg_fn_out,
         args.groups,
         strict=args.strict,
-        verbose=args.verbose)
+        verbose=args.verbose,
+        unresolved_out=args.unresolved_out)
 
 
 if __name__ == '__main__':
