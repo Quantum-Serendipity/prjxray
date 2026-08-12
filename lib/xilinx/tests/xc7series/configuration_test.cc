@@ -24,6 +24,7 @@
 #include <prjxray/xilinx/nop_packet.h>
 #include <prjxray/xilinx/xc7series/command.h>
 #include <prjxray/xilinx/xc7series/ecc.h>
+#include <prjxray/xilinx/xc7series/prepass_geometry.h>
 #include <yaml-cpp/yaml.h>
 
 using namespace prjxray::xilinx;
@@ -630,15 +631,39 @@ std::vector<uint32_t> FarSequence(const Series7::ConfigurationPackage& pkg) {
 	return out;
 }
 
-// A CLB-only frame set spanning the minors the pre-pass treats differently.
-Frames<Series7>::Frames2Data ClbFrames(uint32_t fill,
-                                       const std::vector<int>& minors) {
+// A frame set in one configuration column, spanning the minors the pre-pass
+// treats differently. Column 0 of lib/test_data/prepass_tilegrid.json is a CLB
+// column whose tiles cover words 0-1 and 99-100 either side of the HCLK tile at
+// word 50; column 1 is a DSP column and column 2 a BRAM column, both with a
+// ten-word tile at words 0-9.
+Frames<Series7>::Frames2Data ColumnFrames(uint32_t fill,
+                                          const std::vector<int>& minors,
+                                          uint16_t column = 0) {
 	Frames<Series7>::Frames2Data f;
 	for (int m : minors)
 		f.emplace(xc7series::FrameAddress(
-		              xc7series::BlockType::CLB_IO_CLK, false, 0, 0, m),
+		              xc7series::BlockType::CLB_IO_CLK, false, 0,
+		              column, m),
 		          std::vector<uint32_t>(101, fill));
 	return f;
+}
+
+Frames<Series7>::Frames2Data ClbFrames(uint32_t fill,
+                                       const std::vector<int>& minors) {
+	return ColumnFrames(fill, minors, 0);
+}
+
+// SITE is per tile, so every pre-pass test needs the tile lattice. The fixture
+// is loaded once; a test that cannot load it must fail loudly rather than skip.
+const xc7series::PrePassGeometry& TestGeometry() {
+	static std::unique_ptr<xc7series::PrePassGeometry> geo = [] {
+		std::string err;
+		auto g = xc7series::PrePassGeometry::Load(
+		    "prepass_tilegrid.json", "prepass_db", &err);
+		EXPECT_TRUE(g) << err;
+		return g;
+	}();
+	return *geo;
 }
 
 uint32_t ExpectedEcc(std::vector<uint32_t> frame) {
@@ -648,14 +673,14 @@ uint32_t ExpectedEcc(std::vector<uint32_t> frame) {
 
 }  // namespace
 
-// SITE and PARK, per docs/far-double-write-verdict.md section 5.1, on the six
+// SITE and PARK, per docs/far-double-write-verdict.md section 5.1, on the
 // minors whose treatment differs. The RM fill is 0xFFFFFFFF and the static is
 // empty, so whatever survives is exactly SITE|PARK.
 TEST(ConfigurationTest, PrePassAppliesSiteAndParkMasks) {
 	auto frames = ClbFrames(0xFFFFFFFF, {0, 1, 2, 17, 24, 25, 30});
 	Frames<Series7>::Frames2Data no_static;
 	auto pass1 = Configuration<Series7>::createPrePassFrames(
-	    frames, no_static, /*have_static=*/false);
+	    frames, no_static, /*have_static=*/false, TestGeometry(), nullptr);
 	ASSERT_EQ(pass1.size(), frames.size());
 
 	auto at = [&pass1](int minor) -> const std::vector<uint32_t>& {
@@ -673,18 +698,132 @@ TEST(ConfigurationTest, PrePassAppliesSiteAndParkMasks) {
 	EXPECT_EQ(at(24)[0], 0xFFFFFFFFu);
 	EXPECT_EQ(at(24)[100], 0xFFFFFFFFu);
 	EXPECT_EQ(at(25)[0], 0xFFFFFFFFu);
+	// ...at every word of the frame, PARK being the one term that is not a
+	// function of the tile lattice.
+	EXPECT_EQ(at(24)[49], 0xFFFFFFFFu);
 	// ...except word 50, which belongs to the HCLK tile and carries the ECC.
 	EXPECT_EQ(at(24)[0x32] & 0xFFFFE000u, 0x00000000u);
-	// minors 26-35: the site planes, kept verbatim.
-	EXPECT_EQ(at(30)[0], 0xFFFFFFFFu);
+	// minors 26-35: the site planes, minus *.PRECYINIT.CIN. Bit 13 of the
+	// tile's first word is SLICE*_X0's CIN and is withheld 66 of 66; before
+	// Unit 6.2b this word came out 0xFFFFFFFF and RM-A missed by that bit.
+	EXPECT_EQ(at(30)[0], 0xFFFFFFFFu & ~(1u << 13));
+	EXPECT_EQ(at(30)[1], 0xFFFFFFFFu);
+	// A word inside the column that no tile of it covers keeps nothing at
+	// all -- SITE is a property of the tile, not of the minor.
+	EXPECT_EQ(at(30)[2], 0x00000000u);
 	// word 50 is dropped at every minor (the ECC field aside).
 	for (int m : {0, 1, 2, 17, 24, 25, 30})
 		EXPECT_EQ(at(m)[0x32] & 0xFFFFE000u, 0x00000000u)
 		    << "minor " << m;
 }
 
+// THE 2,987-BIT DEFECT, at the writer's own interface. Section 5.1's SITE is
+// per tile: in a BRAM configuration column pass 1 keeps minor 27 and nothing
+// else, and in a DSP column it keeps minors 26-27 minus the tile's own input
+// muxes. The mask this replaces returned 0xFFFFFFFF for every minor in 26..35
+// whatever the column was made of.
+TEST(ConfigurationTest, PrePassSiteMaskFollowsTheColumnsTileTypes) {
+	Frames<Series7>::Frames2Data no_static;
+	// BRAM column (fixture column 2), minors 26 and 27.
+	auto bram = ColumnFrames(0xFFFFFFFF, {0, 1, 26, 27}, 2);
+	auto b1 = Configuration<Series7>::createPrePassFrames(
+	    bram, no_static, false, TestGeometry(), nullptr);
+	auto bat = [&b1](int minor) -> const std::vector<uint32_t>& {
+		return b1.at(xc7series::FrameAddress(
+		    xc7series::BlockType::CLB_IO_CLK, false, 0, 2, minor));
+	};
+	// minor 26 is the BRAM's address-input mux plane: withheld entirely.
+	for (size_t w = 0; w < 10; ++w)
+		EXPECT_EQ(bat(26)[w], 0x0u) << "BRAM minor 26 word " << w;
+	// minor 27 carries every RAMB* attribute: kept entirely.
+	for (size_t w = 0; w < 10; ++w)
+		EXPECT_EQ(bat(27)[w], 0xFFFFFFFFu) << "BRAM minor 27 word " << w;
+	// minors 0 and 1: everything present is the INT tile's, so the CLB
+	// lattice must NOT appear here.
+	EXPECT_EQ(bat(0)[0], 0x0u);
+	EXPECT_EQ(bat(1)[0], 0x0u);
+
+	// DSP column (fixture column 1).
+	auto dsp = ColumnFrames(0xFFFFFFFF, {0, 26, 27}, 1);
+	auto d1 = Configuration<Series7>::createPrePassFrames(
+	    dsp, no_static, false, TestGeometry(), nullptr);
+	auto dat = [&d1](int minor) -> const std::vector<uint32_t>& {
+		return d1.at(xc7series::FrameAddress(
+		    xc7series::BlockType::CLB_IO_CLK, false, 0, 1, minor));
+	};
+	EXPECT_EQ(dat(0)[0], 0x0u);
+	// 26_50 and 26_63 are DSP_VCC_L/DSP_GND_L positions in the tile's
+	// second word; everything else in that word is kept.
+	EXPECT_EQ(dat(26)[1], 0xFFFFFFFFu & ~(1u << 18) & ~(1u << 31));
+	// AREG_0's minor-26 bits are kept -- only the minor-27 bit of the code
+	// is withheld, which is the one fitted element of the mask.
+	EXPECT_EQ(dat(26)[3], 0xFFFFFFFFu);
+	EXPECT_EQ(dat(27)[3], 0xFFFFFFFFu & ~(1u << 15));
+}
+
+// The two elements section 5.1 flags as INFERRED are counted, so a future
+// mismatch can be attributed instead of guessed at.
+TEST(ConfigurationTest, PrePassReportsWhenAnInferredMaskElementFires) {
+	Frames<Series7>::Frames2Data no_static;
+	PrePassReport rep;
+	// Minor 31 bit 12 is SLICE*_X1's PRECYINIT.CIN -- never seen in a
+	// bitstream, taken from prjxray by symmetry. Two CLB tiles cover words
+	// 0-1 and 99-100 of the fixture's column 0, so two instances fire.
+	auto frames = ColumnFrames(0xFFFFFFFF, {31}, 0);
+	Configuration<Series7>::createPrePassFrames(frames, no_static, false,
+	                                            TestGeometry(), &rep);
+	EXPECT_EQ(rep.inferred_cin_x1_bits, 2u);
+	EXPECT_EQ(rep.inferred_dsp_reg0_bits, 0u);
+
+	// Minor 27 of a DSP column: four {A,B}REG_0 bits in the one tile.
+	PrePassReport dsp_rep;
+	auto dsp = ColumnFrames(0xFFFFFFFF, {27}, 1);
+	Configuration<Series7>::createPrePassFrames(dsp, no_static, false,
+	                                            TestGeometry(), &dsp_rep);
+	EXPECT_EQ(dsp_rep.inferred_dsp_reg0_bits, 4u);
+	EXPECT_EQ(dsp_rep.inferred_cin_x1_bits, 0u);
+
+	// A minor where neither element applies fires neither counter, so the
+	// counters are not just counting frames.
+	PrePassReport quiet;
+	auto plain = ColumnFrames(0xFFFFFFFF, {30}, 0);
+	Configuration<Series7>::createPrePassFrames(plain, no_static, false,
+	                                            TestGeometry(), &quiet);
+	EXPECT_EQ(quiet.inferred_cin_x1_bits, 0u);
+	EXPECT_EQ(quiet.inferred_dsp_reg0_bits, 0u);
+}
+
+// A column tilegrid.json has no tile in, and a column whose bit-bearing tile
+// type section 5.1's table does not name, are different situations and are
+// reported as different situations.
+TEST(ConfigurationTest, PrePassReportsGeometryItDoesNotHave) {
+	Frames<Series7>::Frames2Data no_static;
+	PrePassReport rep;
+	auto frames = ColumnFrames(0xFFFFFFFF, {30}, 5);  // not in the fixture
+	Configuration<Series7>::createPrePassFrames(frames, no_static, false,
+	                                            TestGeometry(), &rep);
+	EXPECT_EQ(rep.columns_without_geometry.size(), 1u);
+	EXPECT_TRUE(rep.unclassified_types_touched.empty());
+
+	PrePassReport io_rep;
+	auto io = ColumnFrames(0xFFFFFFFF, {30}, 3);  // the LIOI3 column
+	Configuration<Series7>::createPrePassFrames(io, no_static, false,
+	                                            TestGeometry(), &io_rep);
+	EXPECT_TRUE(io_rep.columns_without_geometry.empty());
+	EXPECT_EQ(io_rep.unclassified_types_touched.count("LIOI3"), 1u);
+
+	// A plain CLB column reports neither, so both are not always on.
+	PrePassReport clb_rep;
+	auto clb = ColumnFrames(0xFFFFFFFF, {30}, 0);
+	Configuration<Series7>::createPrePassFrames(clb, no_static, false,
+	                                            TestGeometry(), &clb_rep);
+	EXPECT_TRUE(clb_rep.columns_without_geometry.empty());
+	EXPECT_TRUE(clb_rep.unclassified_types_touched.empty());
+}
+
 // The ECC is RECOMPUTED for pass 1's own content, not copied from pass 2 and
-// not left zero. Vivado's pass 1 carries a correct ECC in 825 of 825 frames.
+// not left zero. Vivado's pass 1 carries a correct ECC in 825 of 825 block-0
+// frames.
 TEST(ConfigurationTest, PrePassRecomputesTheFrameEcc) {
 	// Minor 24 is parked to all-ones; minor 30 keeps a site payload whose
 	// ECC is NOT zero. Two frames with different correct ECCs, so neither a
@@ -700,7 +839,7 @@ TEST(ConfigurationTest, PrePassRecomputesTheFrameEcc) {
 	    std::vector<uint32_t>(101, 0x00000001));
 	Frames<Series7>::Frames2Data no_static;
 	auto pass1 = Configuration<Series7>::createPrePassFrames(
-	    frames, no_static, false);
+	    frames, no_static, false, TestGeometry(), nullptr);
 
 	for (auto& f : pass1) {
 		std::vector<uint32_t> recomputed = f.second;
@@ -717,7 +856,11 @@ TEST(ConfigurationTest, PrePassRecomputesTheFrameEcc) {
 	// Vivado's word 50 looks blank there and why "it has no ECC" is the
 	// wrong conclusion to draw from it.
 	EXPECT_EQ(m24[0x32] & 0x1FFFu, 0x0u);
-	EXPECT_EQ(m30[0x32] & 0x1FFFu, 0x06A0u);
+	// Four words survive SITE here (the fixture column's two CLB tiles at
+	// words 0-1 and 99-100), so this literal also pins WHICH words the
+	// per-tile mask kept: with the old (minor, word) mask all 100 survived
+	// and the ECC came out 0x06A0.
+	EXPECT_EQ(m30[0x32] & 0x1FFFu, 0x1040u);
 }
 
 // The STATIC term. It is what makes the pre-pass constructible, and it is the
@@ -728,10 +871,10 @@ TEST(ConfigurationTest, PrePassKeepsTheStaticsOwnInterconnect) {
 	// Static content in the same frames, on disjoint bits.
 	auto stat = ClbFrames(0xF000000F, {2, 30});
 
-	auto with = Configuration<Series7>::createPrePassFrames(pass2, stat,
-	                                                        true);
+	auto with = Configuration<Series7>::createPrePassFrames(
+	    pass2, stat, true, TestGeometry(), nullptr);
 	auto without = Configuration<Series7>::createPrePassFrames(
-	    pass2, stat, /*have_static=*/false);
+	    pass2, stat, /*have_static=*/false, TestGeometry(), nullptr);
 
 	auto at = [](const Frames<Series7>::Frames2Data& f,
 	             int minor) -> const std::vector<uint32_t>& {
@@ -748,29 +891,67 @@ TEST(ConfigurationTest, PrePassKeepsTheStaticsOwnInterconnect) {
 	EXPECT_EQ(at(without, 30)[0], 0x0F0F0F0Fu);
 }
 
-// Section 5.1 states SITE/PARK over (minor, word) with no block-type term, but
-// it was measured on block type 0 only. Applying PARK to a BLOCK_RAM frame at
-// minor 24/25 would force it to all-ones; the golden's BRAM pass 1 is entirely
-// zero and byte-equal to its pass 2.
+// The transformation applies to block type 0 and to NOTHING else. Every other
+// block type is written twice verbatim -- same payload, ECC word included, no
+// mask, no park, no recomputation. Read without a block-type term, section 5.1
+// forces six whole BRAM frames to all-ones.
 TEST(ConfigurationTest, PrePassLeavesNonClbBlockTypesAlone) {
 	Frames<Series7>::Frames2Data frames;
-	for (int m : {0, 1, 24, 25, 30})
+	// A recognisable, non-uniform payload: "verbatim" and "zeroed" have to
+	// be distinguishable, and an all-zero frame cannot tell them apart.
+	std::vector<uint32_t> content(101, 0u);
+	for (size_t w = 0; w < content.size(); ++w)
+		content[w] = 0xB0000000u + static_cast<uint32_t>(w);
+	content[0x32] = 0u;  // Vivado writes no frame ECC in a BLOCK_RAM block
+	for (int m : {0, 1, 24, 25, 27, 30})
 		frames.emplace(
 		    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM,
 		                            false, 0, 0, m),
-		    std::vector<uint32_t>(101, 0x0));
+		    content);
 	Frames<Series7>::Frames2Data no_static;
-	auto pass1 = Configuration<Series7>::createPrePassFrames(frames,
-	                                                         no_static,
-	                                                         false);
+	PrePassReport rep;
+	auto pass1 = Configuration<Series7>::createPrePassFrames(
+	    frames, no_static, false, TestGeometry(), &rep);
 	ASSERT_EQ(pass1.size(), frames.size());
-	for (auto& f : pass1) {
-		for (size_t w = 0; w < f.second.size(); ++w)
-			ASSERT_EQ(f.second[w], 0x0u)
-			    << "BRAM minor "
-			    << static_cast<int>(f.first.minor()) << " word "
-			    << w;
-	}
+	for (auto& f : pass1)
+		EXPECT_EQ(f.second, content)
+		    << "BRAM minor " << static_cast<int>(f.first.minor());
+	EXPECT_EQ(rep.verbatim_frames, frames.size());
+	EXPECT_EQ(rep.clb_frames, 0u);
+}
+
+// And prjxray's updateECC must not run there. Word 50 of every BLOCK_RAM frame
+// is zero in both passes -- 0 nonzero of 772, content or no content -- and
+// updateECC would invent one in exactly the 16 frames per module that carry
+// initialised block RAM content.
+TEST(ConfigurationTest, PrePassNeverComputesAnEccOnBlockRam) {
+	// This is s1/F block 1 frame 0's situation: content whose correct ECC
+	// is NOT zero, which Vivado nonetheless leaves at zero.
+	std::vector<uint32_t> content(101, 0u);
+	content[0] = 0x00000001u;
+	ASSERT_NE(ExpectedEcc(content) & 0x1FFFu, 0x0u)
+	    << "the fixture must be a frame updateECC would change";
+	Frames<Series7>::Frames2Data frames;
+	frames.emplace(
+	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 0,
+	                            1, 0),
+	    content);
+	Frames<Series7>::Frames2Data no_static;
+	auto pass1 = Configuration<Series7>::createPrePassFrames(
+	    frames, no_static, false, TestGeometry(), nullptr);
+	const auto& out = pass1.begin()->second;
+	EXPECT_EQ(out[0x32], 0x0u);
+	EXPECT_EQ(out, content);
+
+	// The same content in a CLB_IO_CLK frame DOES get an ECC, so the test
+	// above is about the block type and not about the content.
+	Frames<Series7>::Frames2Data clb;
+	clb.emplace(xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK,
+	                                    false, 0, 0, 30),
+	            content);
+	auto clb1 = Configuration<Series7>::createPrePassFrames(
+	    clb, no_static, false, TestGeometry(), nullptr);
+	EXPECT_NE(clb1.begin()->second[0x32] & 0x1FFFu, 0x0u);
 }
 
 // Word 50 is 0 plus the computed ECC, whatever the static holds there. Section
@@ -780,8 +961,8 @@ TEST(ConfigurationTest, PrePassLeavesNonClbBlockTypesAlone) {
 TEST(ConfigurationTest, PrePassWithholdsWord50FromTheStaticToo) {
 	auto pass2 = ClbFrames(0x0, {2, 17});
 	auto stat = ClbFrames(0xFFFFFFFF, {2, 17});
-	auto pass1 = Configuration<Series7>::createPrePassFrames(pass2, stat,
-	                                                         true);
+	auto pass1 = Configuration<Series7>::createPrePassFrames(
+	    pass2, stat, true, TestGeometry(), nullptr);
 	for (auto& f : pass1) {
 		EXPECT_EQ(f.second[0x32] & 0xFFFFE000u, 0x0u)
 		    << "minor " << static_cast<int>(f.first.minor());
@@ -797,7 +978,7 @@ TEST(ConfigurationTest, PrePassWithholdsWord50FromTheStaticToo) {
 TEST(ConfigurationTest, PrePassRefusesOnOtherArchitectures) {
 	Frames<UltraScale>::Frames2Data frames, no_static;
 	EXPECT_THROW(Configuration<UltraScale>::createPrePassFrames(
-	                 frames, no_static, false),
+	                 frames, no_static, false, TestGeometry(), nullptr),
 	             std::runtime_error);
 }
 
@@ -844,7 +1025,7 @@ TEST(ConfigurationTest, PartialPackageInterleavesTheTwoPasses) {
 		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xBC);
 	Frames<Series7>::Frames2Data no_static;
 	auto pass1_frames = Configuration<Series7>::createPrePassFrames(
-	    frames, no_static, false);
+	    frames, no_static, false, TestGeometry(), nullptr);
 
 	auto pass2_blocks =
 	    Configuration<Series7>::createPartialPacketData(frames, part, 0);

@@ -24,6 +24,7 @@ add_library(libprjxray
 	xilinx/xc7series/configuration_bus.cc
 	xilinx/xc7series/configuration_column.cc
 	xilinx/xc7series/ecc.cc
+	xilinx/xc7series/prepass_geometry.cc
 )
 target_include_directories(libprjxray PUBLIC "include")
 target_link_libraries(libprjxray absl::optional absl::variant absl::strings absl::span absl::time yaml-cpp)
@@ -64,6 +65,7 @@ if (PRJXRAY_BUILD_TESTING)
 		xilinx/tests/xc7series/frame_address_test.cc
 		xilinx/tests/xc7series/global_clock_region_test.cc
 		xilinx/tests/xc7series/part_test.cc
+		xilinx/tests/xc7series/prepass_geometry_test.cc
 		xilinx/tests/xc7series/row_test.cc
 		xilinx/tests/xc7series/frames_test.cc)
 	target_link_libraries(xilinx_xc7series_test libprjxray gtest_main)

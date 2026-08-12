@@ -1,0 +1,25 @@
+{
+"_comment": "Test fixture for PrePassGeometry. Six configuration columns of one row, in prjxray tilegrid.json's own shape, kept sparse: only the words the tests look at are covered by a tile, so 'this word has no mask' and 'this kind of tile owns nothing here' can be told apart. Offsets are real ones -- a CLB column's tiles sit at 0,2,...,48 and 51,53,...,99 either side of the HCLK tile's word 50; a DSP or BRAM column's at 0,10,...,40 and 51,61,...,91. Column 5 (baseaddr 0x00000280) is deliberately ABSENT, so a frame can address a column the tilegrid does not know.",
+
+"CLBLL_L_X0Y0":  {"type": "CLBLL_L", "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000000", "frames": 36, "offset": 0,  "words": 2}}},
+"INT_L_X0Y0":    {"type": "INT_L",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000000", "frames": 28, "offset": 0,  "words": 2}}},
+"HCLK_L_X0Y0":   {"type": "HCLK_L",  "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000000", "frames": 26, "offset": 50, "words": 1}}},
+"CLBLL_L_X0Y1":  {"type": "CLBLL_L", "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000000", "frames": 36, "offset": 99, "words": 2}}},
+"INT_L_X0Y1":    {"type": "INT_L",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000000", "frames": 28, "offset": 99, "words": 2}}},
+
+"DSP_L_X1Y0":    {"type": "DSP_L",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000080", "frames": 28, "offset": 0,  "words": 10}}},
+"INT_L_X1Y0":    {"type": "INT_L",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000080", "frames": 28, "offset": 0,  "words": 2}}},
+"HCLK_L_X1Y0":   {"type": "HCLK_L",  "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000080", "frames": 26, "offset": 50, "words": 1}}},
+
+"BRAM_L_X2Y0":   {"type": "BRAM_L",  "bits": {"BLOCK_RAM": {"baseaddr": "0x00800000", "frames": 128, "offset": 0, "words": 10}, "CLB_IO_CLK": {"baseaddr": "0x00000100", "frames": 28, "offset": 0, "words": 10}}},
+"INT_L_X2Y0":    {"type": "INT_L",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000100", "frames": 28, "offset": 0,  "words": 2}}},
+"HCLK_L_X2Y0":   {"type": "HCLK_L",  "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000100", "frames": 26, "offset": 50, "words": 1}}},
+
+"LIOI3_X3Y0":    {"type": "LIOI3",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000180", "frames": 42, "offset": 0,  "words": 4}}},
+"INT_L_X3Y0":    {"type": "INT_L",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000180", "frames": 28, "offset": 0,  "words": 2}}},
+
+"CLBLM_R_X4Y0":  {"type": "CLBLM_R", "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000200", "frames": 36, "offset": 0,  "words": 2}}},
+"INT_R_X4Y0":    {"type": "INT_R",   "bits": {"CLB_IO_CLK": {"baseaddr": "0x00000200", "frames": 28, "offset": 0,  "words": 2}}},
+
+"BRAM_INT_INTERFACE_L_X2Y0": {"type": "BRAM_INT_INTERFACE_L", "bits": {}, "sites": {}}
+}
