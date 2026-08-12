@@ -467,6 +467,55 @@ fi
 # Check aggregate db for consistency and make canonical
 ${XRAY_PARSEDB} --strict "$tmp2" "$db"
 
+# --- canonical serialisation order -------------------------------------------
+#
+# parsedb.py's "canonical" is `sorted(lines)` -- plain ASCII order on the whole
+# line. utils/sort_db.py's is different and it is the one the SHIPPED database
+# is in: numeric-aware tag components, and bits sorted ignoring the leading
+# `!`. Nothing in the fuzzer path applied it. `make db-format-<family>` did,
+# and that is a separate target from the fuzzer's own `run`.
+#
+# The cost of leaving it out is not cosmetic. Straight after
+# `make -C fuzzers/010-clb-lutinit run`, `git diff` against the reference
+# database was 2,170 lines -- 454 insertions, 454 deletions across 8 files --
+# with ZERO set differences: same tags, same bits, same origins, and not one
+# LUT-INIT line among the 908 changed. Every changed line was a multi-bit tag
+# belonging to some OTHER fuzzer, re-serialised on its way past. Anyone wiring
+# CI that diffs fuzzer output against the reference gets a loud red failure and
+# goes hunting a determinism bug that does not exist. See
+# docs/fidelity-ab-result.md section 5.4.
+#
+# So canonicalisation happens HERE, not in a stage a caller has to remember.
+# mergedb.sh is the choke point: every path that writes a segbits or mask file
+# goes through it, including `make -C fuzzers/<one> run`, which reaches no
+# top-level Makefile target at all. Putting it in `db-<family>` instead would
+# be one line and would leave the single-fuzzer path -- the one Unit 3.1
+# actually ran -- still producing raw order.
+#
+# It runs under the same lock and AFTER parsedb has accepted the result, so a
+# rejected merge is never reordered, and it is the last thing to touch the
+# files before the stamp is written.
+#
+# PYTHONPATH is set explicitly because sort_db.py imports `utils.xjson` and
+# `utils.cmp`, which need $XRAY_DIR on sys.path -- running it as
+# `python3 $XRAY_DIR/utils/sort_db.py` puts $XRAY_DIR/utils there instead.
+#
+# Cost: 0.06 s on a 9-line file, 0.13 s on 3,636-line segbits_int_l.db, 0.63 s
+# on the 36,864-line segbits_bram_l.block_ram.db.
+#
+# XRAY_SORTDB=0 turns it off. A failure is NOT swallowed: `set -e` aborts,
+# because a database silently left in the wrong order is the defect this exists
+# to remove.
+if [ "${XRAY_SORTDB:-1}" = 1 ]; then
+	if $ismask ; then
+		PYTHONPATH="${XRAY_DIR}${PYTHONPATH:+:$PYTHONPATH}" \
+			python3 ${XRAY_DIR}/utils/sort_db.py "$db"
+	else
+		PYTHONPATH="${XRAY_DIR}${PYTHONPATH:+:$PYTHONPATH}" \
+			python3 ${XRAY_DIR}/utils/sort_db.py "$db" "$db_origin"
+	fi
+fi
+
 # Record the version that produced this merge. Written AFTER parsedb has
 # accepted the result, and still under the lock taken above (flock is released
 # on script exit), so the stamp never claims a merge that did not land.
