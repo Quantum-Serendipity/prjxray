@@ -135,12 +135,23 @@ class BitstreamWriter {
 	// Writes out the complete bitstream for Xilinx FPGA based on
 	// the Configuration Package which holds the complete programming
 	// sequence.
+	//
+	// `raw` writes the configuration word stream on its own -- no .bit TLV
+	// header and no trailing length fix-up -- for a consumer that feeds the
+	// ICAP directly. Everything from the bus-width auto-detection preamble
+	// onwards is byte-identical to the .bit's body; only the header is
+	// dropped. (The preamble itself is kept: 0xFFFFFFFF, 0x000000BB and
+	// 0x11220044 are all type-0/type-7 words that the packet processor
+	// discards, so they are inert at the ICAP, and keeping them makes the
+	// raw stream a byte-exact suffix of the .bit -- a property that can be
+	// checked, where dropping them would be an untested change.)
 	int writeBitstream(
 	    const typename ArchType::ConfigurationPackage& packets,
 	    const std::string& part_name,
 	    const std::string& frames_file,
 	    const std::string& generator_name,
-	    const std::string& output_file);
+	    const std::string& output_file,
+	    bool raw = false);
 	iterator begin();
 	iterator end();
 
@@ -162,7 +173,8 @@ int BitstreamWriter<ArchType>::writeBitstream(
     const std::string& part_name,
     const std::string& frames_file,
     const std::string& generator_name,
-    const std::string& output_file) {
+    const std::string& output_file,
+    bool raw) {
 	std::ofstream out_file(output_file, std::ofstream::binary);
 	if (!out_file) {
 		std::cerr << "Unable to open file for writting: " << output_file
@@ -170,14 +182,20 @@ int BitstreamWriter<ArchType>::writeBitstream(
 		return 1;
 	}
 
-	BitstreamHeader bit_header(
-	    create_header(part_name, frames_file, generator_name));
-	out_file.write(reinterpret_cast<const char*>(bit_header.data()),
-	               bit_header.size());
+	std::ofstream::pos_type end_of_header_pos = out_file.tellp();
+	std::ofstream::pos_type header_data_length_pos = end_of_header_pos;
+	if (!raw) {
+		BitstreamHeader bit_header(
+		    create_header(part_name, frames_file, generator_name));
+		out_file.write(
+		    reinterpret_cast<const char*>(bit_header.data()),
+		    bit_header.size());
 
-	auto end_of_header_pos = out_file.tellp();
-	auto header_data_length_pos =
-	    end_of_header_pos - static_cast<std::ofstream::off_type>(4);
+		end_of_header_pos = out_file.tellp();
+		header_data_length_pos =
+		    end_of_header_pos -
+		    static_cast<std::ofstream::off_type>(4);
+	}
 
 	BitstreamWriter<ArchType> out_bitstream_writer(packets);
 	int bytes_per_word = sizeof(typename ArchType::WordType);
@@ -186,6 +204,9 @@ int BitstreamWriter<ArchType>::writeBitstream(
 			out_file.put((word >> (byte * 8)) & 0xFF);
 		}
 	}
+
+	if (raw)
+		return 0;
 
 	uint32_t length_of_data = out_file.tellp() - end_of_header_pos;
 

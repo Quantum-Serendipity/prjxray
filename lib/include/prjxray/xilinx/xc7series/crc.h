@@ -24,7 +24,12 @@ namespace xc7series {
 // Extend the current CRC value with one register address (5bit) and
 // frame data (32bit) pair and return the newly computed CRC value.
 
-uint32_t icap_crc(uint32_t addr, uint32_t data, uint32_t prev) {
+// `inline` because this is a function DEFINITION in a header. It used to have
+// exactly one includer (crc_test.cc) so the ODR violation was latent; the
+// partial-bitstream writer is the second, and without `inline` libprjxray and
+// the test binary both emit a strong `icap_crc` and the link fails with
+// "multiple definition of".
+inline uint32_t icap_crc(uint32_t addr, uint32_t data, uint32_t prev) {
 	constexpr int kAddressBitWidth = 5;
 	constexpr int kDataBitWidth = 32;
 
