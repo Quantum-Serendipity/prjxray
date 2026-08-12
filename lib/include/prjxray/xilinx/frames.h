@@ -40,17 +40,21 @@ class Frames {
 	void addMissingFrames(
 	    const absl::optional<typename ArchType::Part>& part);
 
-	// Adds empty frames that are present in provided address ranges
-	// of a specific part. This version is used for filling missing frames
-	// in Partial Reconfiguration Region if there are address gaps.
-	// clb_*_addr - address range for CLB_IO_CLK block type
-	// bram_*_addr - address range for BRAM block type
-	void addMissingFrames(
-	    const absl::optional<typename ArchType::Part>& part,
-	    uint32_t clb_start_addr,
-	    uint32_t clb_end_addr,
-	    uint32_t bram_start_addr,
-	    uint32_t bram_end_addr);
+	// NOTE: a second addMissingFrames() taking (clb_start, clb_end,
+	// bram_start, bram_end) used to live here. It zero-filled every device
+	// frame whose NUMERIC address fell inside those two intervals. An ROI
+	// is a rectangle in (row, column) and an address range is an interval,
+	// and the two are not the same set: on xc7a100tcsg324-1, for the
+	// 1,004-frame ROI GRID_X 74..101 / GRID_Y 1..103, the interval also
+	// contains row 0 columns 41..57 and row 1 columns 0..29 -- 2,032 frames
+	// of live static logic, 2,031 of which were written back as zeros,
+	// 801.3 KiB, at exit 0 with no warning. Its loop also hung forever at
+	// 100% CPU on four inputs, including the two any user tries first (no
+	// address flags at all, and a CLB-only ROI).
+	//
+	// The partial-bitstream writer now derives its frame set from the input
+	// .frm instead; there is nothing left to fill in. See
+	// Configuration::createPartialPacketData.
 
 	// Returns the map with frame addresses and corresponding data
 	Frames2Data& getFrames() { return frames_data_; }
@@ -138,39 +142,6 @@ void Frames<ArchType>::addMissingFrames(
 		current_frame_address =
 		    part->GetNextFrameAddress(*current_frame_address);
 	} while (current_frame_address);
-}
-
-template <typename ArchType>
-void Frames<ArchType>::addMissingFrames(
-    const absl::optional<typename ArchType::Part>& part,
-    uint32_t clb_start_addr,
-    uint32_t clb_end_addr,
-    uint32_t bram_start_addr,
-    uint32_t bram_end_addr) {
-	// CLB_IO_CLK block types are always on lower addresses,
-	// the region starts there and ends on BRAM addresses.
-	auto current_frame_address =
-	    absl::optional<typename ArchType::FrameAddress>(
-	        typename ArchType::FrameAddress((clb_start_addr)));
-	auto end_frame_address =
-	    absl::optional<typename ArchType::FrameAddress>(
-	        typename ArchType::FrameAddress(bram_end_addr));
-	do {
-		auto iter = frames_data_.find(*current_frame_address);
-		if (iter == frames_data_.end() &&
-		    ((*current_frame_address >= clb_start_addr &&
-		      *current_frame_address <= clb_end_addr) ||
-		     (*current_frame_address >= bram_start_addr &&
-		      *current_frame_address <= bram_end_addr))) {
-			FrameData frame_data(ArchType::words_per_frame, 0);
-			frames_data_.insert(
-			    std::pair<typename ArchType::FrameAddress,
-			              FrameData>(*current_frame_address,
-			                         frame_data));
-		}
-		current_frame_address =
-		    part->GetNextFrameAddress(*current_frame_address);
-	} while (*current_frame_address <= *end_frame_address);
 }
 
 }  // namespace xilinx
