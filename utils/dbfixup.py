@@ -463,6 +463,27 @@ def group_tags(lines, tag_groups, bit_groups):
 
         # Parse the line
         tag, bits, mode, _ = util.parse_db_line(line)
+
+        # An UNSOLVED line -- segmatch's `<const0>`, `<const1> <candidates...>`,
+        # `<N candidates>`, `always` -- has no bits for a tag group to add
+        # zeros to, and format_bits() below has no representation for the
+        # annotation, so passing one through here silently rewrites
+        #
+        #     CFG_CENTER_MID.DCIRESET.ENABLED <const1> 26_2165 26_2166 ...
+        # to
+        #     CFG_CENTER_MID.DCIRESET.ENABLED
+        #
+        # and every downstream consumer then sees a line that solved to nothing
+        # rather than a line that could not be solved and why.  That runs
+        # unconditionally, tag groups or not, so add_zero_bits() has never once
+        # observed a `<const1>`: its own `assert mode not in ("<const0>",
+        # "<const1>")` is unreachable, and --unresolved-out would emit bare tag
+        # names.  Pass these through untouched; the drop sites downstream
+        # decide what to do with them.
+        if mode is not None:
+            new_lines.add(line)
+            continue
+
         if not bits:
             bits = set()
         else:
