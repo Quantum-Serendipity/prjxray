@@ -22,6 +22,30 @@ class FasmInconsistentBits(Exception):
     pass
 
 
+class FasmRoiViolation(Exception):
+    """Raised in strict-ROI mode when the emitted frame set would leave the ROI.
+
+    Two distinct conditions raise this, and both mean the same thing to the
+    caller -- the frame set you are about to write is not the frame set you
+    asked for:
+
+      * a FASM feature names a tile outside the ROI rectangle, or
+      * the emitted frame address set is not exactly the ROI's frame set.
+
+    The second is a backstop for the first: it holds regardless of how the
+    features got in (input file, part-level required_features, PUDC_B, the
+    STEPDOWN fixups in fasm2frames), so it cannot be bypassed by adding a new
+    injection site.
+    """
+    pass
+
+
+# How many out-of-ROI TILES to name individually before summarising.  A
+# whole-device FASM against a small ROI produces thousands of them and an
+# unbounded list is not a diagnostic.
+_ROI_VIOLATION_REPORT_LIMIT = 20
+
+
 def init_frame_at_address(frames, addr):
     '''Set given frame to 0 if not initialized '''
     if not addr in frames:
@@ -41,10 +65,72 @@ class FasmAssembler(object):
 
         self.feature_callback = lambda feature: None
 
+        # Strict-ROI state.  self.roi is None unless mark_roi_frames() was
+        # called with strict=True; everything guarded by it is inert in the
+        # default permissive mode.
+        self.roi = None
+        self.roi_frames = None
+        # (tile, feature) -> the FASM line that named it.  A dict, not a list,
+        # because a single out-of-ROI tile typically contributes dozens of
+        # features and repeating the same tile dozens of times buries the
+        # others.
+        self.roi_violations = {}
+
     def set_feature_callback(self, feature_callback):
         self.feature_callback = feature_callback
 
+    def check_roi(self):
+        '''Raise if strict-ROI mode was requested and was violated.
+
+        Idempotent and cheap; call it as often as convenient.
+        '''
+        if not self.roi_violations:
+            return
+
+        roi = self.roi
+
+        # Group by tile.  One out-of-ROI CLB contributes ~30 features, so a
+        # flat list of the first 20 would report one tile 20 times and hide the
+        # other 79.  Per tile: where it is, how many of its features were
+        # rejected, and one of them named in full so the FASM line is greppable.
+        by_tile = {}
+        for (tile, feature), (loc, tile_type, line) in \
+                self.roi_violations.items():
+            entry = by_tile.get(tile)
+            if entry is None:
+                by_tile[tile] = [loc, tile_type, 1, feature, line]
+            else:
+                entry[2] += 1
+                if feature < entry[3]:
+                    entry[3], entry[4] = feature, line
+
+        lines = [
+            'FASM features outside the ROI (GRID_X {}..{}, GRID_Y {}..{}) '
+            'with --roi-strict:'.format(roi.x1, roi.x2, roi.y1, roi.y2)
+        ]
+        for tile in sorted(by_tile)[:_ROI_VIOLATION_REPORT_LIMIT]:
+            loc, tile_type, count, feature, line = by_tile[tile]
+            lines.append(
+                "  {} (type {}, grid_x={}, grid_y={}): {} out-of-ROI "
+                "feature(s), e.g. '{}' from FASM line '{}'".format(
+                    tile, tile_type, loc.grid_x, loc.grid_y, count, feature,
+                    line))
+        if len(by_tile) > _ROI_VIOLATION_REPORT_LIMIT:
+            lines.append(
+                '  ... and {} more out-of-ROI tile(s)'.format(
+                    len(by_tile) - _ROI_VIOLATION_REPORT_LIMIT))
+        lines.append(
+            '{} out-of-ROI feature(s) over {} distinct tile(s). Each one would '
+            'have pulled that tile\'s whole frame column into the emitted set '
+            '-- see --roi vs --roi-strict in fasm2frames --help.'.format(
+                len(self.roi_violations), len(by_tile)))
+        raise FasmRoiViolation('\n'.join(lines))
+
     def get_frames(self, sparse=False):
+        # Unbypassable: no caller gets frames out of an assembler whose FASM
+        # left the ROI, however it called us.
+        self.check_roi()
+
         if not sparse:
             frames = self.frames_init()
         else:
@@ -64,6 +150,27 @@ class FasmAssembler(object):
                 print(f"get_frames: invalid frame address {frame_addr:x8}", file=sys.stderr)
             if is_set:
                 frames[frame_addr][word_addr] |= 1 << bit_index
+
+        # The one assertion that retires the union defect: in strict mode the
+        # emitted address set must be EXACTLY the ROI's, not a superset of it.
+        # The per-feature check above is the diagnosis; this is the proof.  It
+        # also covers the case the per-feature check cannot see -- an in-ROI
+        # tile whose segbits reach a frame column the ROI does not own.
+        if self.roi_frames is not None:
+            emitted = set(frames)
+            extra = emitted - self.roi_frames
+            missing = self.roi_frames - emitted
+            if extra or missing:
+                raise FasmRoiViolation(
+                    'strict ROI frame-set mismatch: emitted {} frames, ROI '
+                    'expects {}.\n'
+                    '  {} frame(s) outside the ROI, first: {}\n'
+                    '  {} ROI frame(s) not emitted, first: {}'.format(
+                        len(emitted), len(self.roi_frames), len(extra),
+                        ', '.join('0x%08X' % a for a in sorted(extra)[:8])
+                        or '(none)', len(missing), ', '.join(
+                            '0x%08X' % a
+                            for a in sorted(missing)[:8]) or '(none)'))
 
         return frames
 
@@ -124,6 +231,18 @@ class FasmAssembler(object):
 
     def enable_feature(self, tile, feature, address, line):
         gridinfo = self.grid.gridinfo_at_tilename(tile)
+
+        if self.roi is not None:
+            loc = self.grid.loc_of_tilename(tile)
+            if not self.roi.tile_in_roi(loc):
+                # Record and return WITHOUT touching self.frames or
+                # self.frames_in_use.  check_roi() will turn this into a
+                # non-zero exit, but returning early also means that even a
+                # caller that swallows the exception cannot end up with the
+                # tile's 36-frame column in the emitted set.
+                self.roi_violations[(tile, feature)] = (
+                    loc, gridinfo.tile_type, line)
+                return
 
         def update_segbit(bit):
             '''Set or clear a single bit in a segment at the given word column and word bit position'''
@@ -217,7 +336,27 @@ class FasmAssembler(object):
                 return
             raise FasmLookupError('\n'.join(missing_features))
 
-    def mark_roi_frames(self, roi):
+        # Report ROI violations as soon as the input is exhausted, so the
+        # message points at the FASM rather than at frame arithmetic.
+        # get_frames() checks again for the injection sites that run later.
+        self.check_roi()
+
+    def mark_roi_frames(self, roi, strict=False):
+        '''Seed frames_in_use with every frame the ROI's tiles occupy.
+
+        strict=False (default) is the historical behaviour and is a UNION: the
+        emitted frame set ends up as (ROI frames) | (frames of every tile any
+        FASM feature touches).  That is correct when the device model handed to
+        place-and-route has already been filtered to the region, because then
+        no out-of-region tile exists to be dragged in.
+
+        strict=True makes the ROI a FILTER instead: enable_feature() refuses
+        any tile outside the rectangle, and get_frames() asserts that the
+        emitted address set is exactly this one.  Required whenever the device
+        model is the FULL device, where a stray feature silently grows the
+        "partial" bitstream to cover static logic that writing it will destroy.
+        '''
+        roi_frames = set()
         for tile in roi.gen_tiles():
             gridinfo = self.grid.gridinfo_at_tilename(tile)
 
@@ -226,3 +365,8 @@ class FasmAssembler(object):
                 for frame in range(bits.base_address,
                                    bits.base_address + bits.frames):
                     self.frames_in_use.add(frame)
+                    roi_frames.add(frame)
+
+        if strict:
+            self.roi = roi
+            self.roi_frames = frozenset(roi_frames)
