@@ -71,7 +71,16 @@ ConfigurationPacket<Spartan6ConfigurationRegister>::InitWithWords(
 			        bit_field_get(words[0], 10, 5));
 			// Type 2 packets according to UG380 consist of
 			// a header word followed by 2 WCD (Word Count Data)
-			// words
+			// words.  Those two words must be present before they
+			// can be read: the size check further down validates
+			// data_word_count, which is too late to protect the
+			// reads that computed it.  On a truncated packet this
+			// was a 2-word heap-buffer-overflow -- the case
+			// BitstreamReaderTest.ParseType2PacketWithoutType1Fails
+			// exercises, caught by AddressSanitizer.
+			if (words.size() < 3)
+				return {words, {}};
+
 			uint32_t data_word_count = (words[1] << 16) | words[2];
 
 			// If the full packet has not been received, return as
