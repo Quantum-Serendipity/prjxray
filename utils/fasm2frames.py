@@ -117,8 +117,17 @@ def run(
         f_out,
         sparse=False,
         roi=None,
+        roi_strict=False,
         debug=False,
         emit_pudc_b_pullup=False):
+    if roi_strict and not roi:
+        raise ValueError('--roi-strict requires --roi')
+    if roi_strict and not sparse:
+        # Without --sparse, get_frames() zero-fills EVERY frame on the part
+        # (frames_init()), so the ROI never bounds anything and the output is
+        # a full-device image whatever the ROI says. Refuse rather than emit
+        # 9k frames under a flag whose whole purpose is to bound them.
+        raise ValueError('--roi-strict requires --sparse')
     db = Database(db_root, part)
     assembler = fasm_assembler.FasmAssembler(db)
 
@@ -175,7 +184,8 @@ def run(
         y1 = roi_j['info']['GRID_Y_MIN']
         y2 = roi_j['info']['GRID_Y_MAX']
 
-        assembler.mark_roi_frames(Roi(db=db, x1=x1, x2=x2, y1=y1, y2=y2))
+        assembler.mark_roi_frames(
+            Roi(db=db, x1=x1, x2=x2, y1=y1, y2=y2), strict=roi_strict)
 
         if 'required_features' in roi_j:
             extra_features = list(
@@ -286,7 +296,22 @@ def main():
         '--sparse', action='store_true', help="Don't zero fill all frames")
     parser.add_argument(
         '--roi',
-        help="ROI design.json file defining which tiles are within the ROI.")
+        help="ROI design.json file defining which tiles are within the ROI. "
+        "PERMISSIVE: the ROI's frames are added to the emitted set, and any "
+        "tile a FASM feature touches adds its frames too, so the result is a "
+        "UNION of the two. Correct when the device model has already been "
+        "filtered to the region. See --roi-strict for the full-device case.")
+    parser.add_argument(
+        '--roi-strict',
+        dest='roi_strict',
+        action='store_true',
+        help="Treat --roi as a FILTER rather than a union: a FASM feature "
+        "naming a tile outside the ROI is a hard error (non-zero exit) "
+        "identifying the feature and its tile, and the emitted frame set is "
+        "asserted to be exactly the ROI's. Requires --roi and --sparse. Use "
+        "this whenever the device model is the full device, where one stray "
+        "feature pulls that tile's whole frame column into a 'partial' "
+        "bitstream and writing it destroys the static logic there.")
     parser.add_argument(
         '--emit_pudc_b_pullup',
         help="Emit an IBUF and PULLUP on the PUDC_B pin if unused",
@@ -301,16 +326,39 @@ def main():
         help='Output FPGA frame (.frm) file (default: stdout)')
 
     args = parser.parse_args()
-    run(
-        db_root=args.db_root,
-        part=args.part,
-        filename_in=args.fn_in,
-        f_out=(open(args.fn_out, 'w') if args.fn_out else sys.stdout),
-        sparse=args.sparse,
-        roi=args.roi,
-        debug=args.debug,
-        emit_pudc_b_pullup=args.emit_pudc_b_pullup)
+
+    f_out = open(args.fn_out, 'w') if args.fn_out else sys.stdout
+    try:
+        run(
+            db_root=args.db_root,
+            part=args.part,
+            filename_in=args.fn_in,
+            f_out=f_out,
+            sparse=args.sparse,
+            roi=args.roi,
+            roi_strict=args.roi_strict,
+            debug=args.debug,
+            emit_pudc_b_pullup=args.emit_pudc_b_pullup)
+    except (fasm_assembler.FasmRoiViolation, ValueError) as e:
+        # Exit 1 with the diagnostic on stderr rather than a traceback: this
+        # is bad input, not a crash, and the calling flow needs a status code
+        # it can branch on.
+        #
+        # Deleting the output file matters as much as the exit code. open(...,
+        # 'w') truncated it before run() was ever entered, so bailing out
+        # without this leaves a zero-length .frm on disk that xc7frames2bit
+        # will happily turn into an empty bitstream -- the same silent-success
+        # failure mode --roi-strict exists to remove.
+        if args.fn_out:
+            f_out.close()
+            try:
+                os.remove(args.fn_out)
+            except OSError:
+                pass
+        eprint('ERROR: %s' % e)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
