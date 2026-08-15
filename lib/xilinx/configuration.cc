@@ -64,7 +64,8 @@ template <>
 void Configuration<Spartan6>::createConfigurationPackage(
     Spartan6::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<Spartan6::Part>& part) {
+    absl::optional<Spartan6::Part>& part,
+    bool emit_crc) {
 	using ArchType = Spartan6;
 	using ConfigurationRegister = ArchType::ConfRegType;
 	// Initialization sequence
@@ -578,9 +579,57 @@ template <>
 void Configuration<Series7>::createConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<Series7::Part>& part) {
+    absl::optional<Series7::Part>& part,
+    bool emit_crc) {
 	using ArchType = Series7;
 	using ConfigurationRegister = ArchType::ConfRegType;
+
+	// THE TWO SUBSTITUTION POINTS.
+	//
+	// A Vivado FULL bitstream for this family writes the CRC register
+	// TWICE, and the two positions are read out of one rather than chosen:
+	// in pt_v2_soc_fn.bit (Vivado 2025.2, 7a100tfgg484) the sequence is
+	//
+	//     ... FDRI/MFWR ...  CRC <= 0x10c41b1c  CMD:GRESTORE  CMD:DGHIGH
+	//     MASK  CTL1  CMD:START  FAR <= 0x03be0000  MASK  CTL0
+	//     CRC <= 0x615009a6  CMD:DESYNC
+	//
+	// which is, position for position, where THIS writer has always put two
+	// CMD:RCRC writes. That is not a coincidence: it is exactly the
+	// two-word substitution Vivado's BITSTREAM.GENERAL.CRC=DISABLE
+	// performs, the same one the partial path documents
+	// (docs/partial-bitstream.md section 11). 0x30000001,<crc> becomes
+	// 0x30008001,0x00000007 and nothing else in the stream moves.
+	//
+	// So emit_crc does not add a code path; it declines to disable one.
+	//
+	// computeStreamCrc() is called on out_packets AS IT STANDS, which is
+	// why this is a lambda and not a precomputed pair of values: the CRC
+	// register holds the accumulator over every register write since the
+	// last reset, and a write to CRC is itself a reset, so CRC #2 covers
+	// only what follows CRC #1. Reading the accumulator at the moment of
+	// emission is the only formulation that cannot get that wrong.
+	auto crc_or_rcrc = [&out_packets, emit_crc]() {
+		if (emit_crc) {
+			out_packets.emplace_back(
+			    new ConfigurationPacketWithPayload<
+			        1, ConfigurationRegister>(
+			        ConfigurationPacket<ConfigurationRegister>::
+			            Opcode::Write,
+			        ConfigurationRegister::CRC,
+			        {Configuration<Series7>::computeStreamCrc(
+			            out_packets)}));
+			return;
+		}
+		out_packets.emplace_back(
+		    new ConfigurationPacketWithPayload<1,
+		                                       ConfigurationRegister>(
+		        ConfigurationPacket<ConfigurationRegister>::Opcode::
+		            Write,
+		        ConfigurationRegister::CMD,
+		        {static_cast<uint32_t>(xc7series::Command::RCRC)}));
+	};
+
 	// Initialization sequence
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 	out_packets.emplace_back(
@@ -687,12 +736,9 @@ void Configuration<Series7>::createConfigurationPackage(
 	    TYPE2, ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
 	    ConfigurationRegister::FDRI, packet_data));
 
-	// Finalization sequence
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::RCRC)}));
+	// Finalization sequence.
+	// CRC #1 -- immediately after the frame data, before CMD:GRESTORE.
+	crc_or_rcrc();
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 	out_packets.emplace_back(
@@ -728,11 +774,10 @@ void Configuration<Series7>::createConfigurationPackage(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
 	        ConfigurationRegister::CTL0, {0x501}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::RCRC)}));
+	// CRC #2 -- after the park FAR and the MASK/CTL0 pair, before
+	// CMD:DESYNC. It accumulates only what follows CRC #1, because a write
+	// to the CRC register resets the accumulator.
+	crc_or_rcrc();
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 	out_packets.emplace_back(
@@ -761,7 +806,8 @@ template <>
 void Configuration<UltraScale>::createConfigurationPackage(
     UltraScale::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<UltraScale::Part>& part) {
+    absl::optional<UltraScale::Part>& part,
+    bool emit_crc) {
 	using ArchType = UltraScale;
 	using ConfigurationRegister = ArchType::ConfRegType;
 	// Initialization sequence
@@ -933,7 +979,8 @@ template <>
 void Configuration<UltraScalePlus>::createConfigurationPackage(
     UltraScalePlus::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<UltraScalePlus::Part>& part) {
+    absl::optional<UltraScalePlus::Part>& part,
+    bool emit_crc) {
 	using ArchType = UltraScalePlus;
 	using ConfigurationRegister = ArchType::ConfRegType;
 	// Initialization sequence
