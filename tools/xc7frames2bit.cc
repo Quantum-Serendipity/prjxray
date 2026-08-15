@@ -699,6 +699,24 @@ int main(int argc, char* argv[]) {
 		          << std::endl;
 		return 1;
 	}
+	// Same rule, second edge. createConfigurationPackage() takes emit_crc on
+	// all four architecture specializations, but only the Series7 body acts
+	// on it: the CRC model (computeStreamCrc) is measured for 7-series and
+	// throws for everything else, and the two substitution positions were
+	// read out of a 7-series Vivado bitstream. Accepting --emit_crc for
+	// another architecture would emit a CRC-DISABLED stream at exit 0 with
+	// the caller believing otherwise -- which is the exact shape of the
+	// defect this flag exists to close.
+	if (FLAGS_emit_crc && FLAGS_architecture != "Series7") {
+		std::cerr << "--emit_crc is characterised for Series7 only and "
+		             "--architecture is "
+		          << FLAGS_architecture
+		          << ". The stream CRC model and the two write "
+		             "positions are both 7-series measurements; there "
+		             "is no degraded version to fall back to."
+		          << std::endl;
+		return 1;
+	}
 	xilinx::Architecture::Container arch_container =
 	    xilinx::ArchitectureFactory::create_architecture(
 	        FLAGS_architecture);
