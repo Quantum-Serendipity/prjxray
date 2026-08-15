@@ -102,10 +102,29 @@ class Configuration {
 	// The pacakge forms a sequence suitable for Xilinx devices.
 	// The programming sequence for Series-7 is taken from
 	// https://www.kc8apf.net/2018/05/unpacking-xilinx-7-series-bitstreams-part-2/
+	//
+	// emit_crc = false (the default, and what every stream this writer has
+	// ever emitted does): the finalization sequence carries TWO CMD:RCRC
+	// writes and NO write to the CRC register, so the device's own CRC
+	// comparison never runs. That is bit-for-bit what Vivado's
+	// BITSTREAM.GENERAL.CRC=DISABLE emits.
+	//
+	// emit_crc = true: each of those two CMD:RCRC writes is replaced, in
+	// place, by a Type-1 write of computeStreamCrc() over everything that
+	// precedes it. The two positions are not chosen -- they are where a
+	// Vivado full bitstream for this family puts its two CRC writes:
+	// immediately after the frame data and immediately before CMD:DESYNC.
+	// A two-word substitution per CRC, exactly as on the partial path;
+	// nothing else in the stream moves.
+	//
+	// It is OPT-IN, and deliberately so. Flipping the default would change
+	// the payload of every full bitstream this toolchain has ever built and
+	// invalidate every recorded payload hash that identifies one.
 	static void createConfigurationPackage(
 	    typename ArchType::ConfigurationPackage& out_packets,
 	    const PacketData& packet_data,
-	    absl::optional<typename ArchType::Part>& part);
+	    absl::optional<typename ArchType::Part>& part,
+	    bool emit_crc);
 
 	// The payload of a partial bitstream, DERIVED FROM THE INPUT FRAME SET.
 	//
@@ -291,25 +310,29 @@ template <>
 void Configuration<Spartan6>::createConfigurationPackage(
     Spartan6::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<Spartan6::Part>& part);
+    absl::optional<Spartan6::Part>& part,
+    bool emit_crc);
 
 template <>
 void Configuration<Series7>::createConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<Series7::Part>& part);
+    absl::optional<Series7::Part>& part,
+    bool emit_crc);
 
 template <>
 void Configuration<UltraScale>::createConfigurationPackage(
     UltraScale::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<UltraScale::Part>& part);
+    absl::optional<UltraScale::Part>& part,
+    bool emit_crc);
 
 template <>
 void Configuration<UltraScalePlus>::createConfigurationPackage(
     UltraScalePlus::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
-    absl::optional<UltraScalePlus::Part>& part);
+    absl::optional<UltraScalePlus::Part>& part,
+    bool emit_crc);
 
 // Same reason as above: these four are defined in configuration.cc and must be
 // declared before use in every translation unit.

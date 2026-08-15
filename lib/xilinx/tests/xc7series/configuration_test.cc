@@ -1273,3 +1273,136 @@ TEST(ConfigurationTest, PartialPackageEndsWithSixteenNops) {
 	}
 	EXPECT_EQ(trailing, 16u);
 }
+
+// ============================================================================
+// Unit X9. THE FULL BITSTREAM'S CRC.
+//
+// Everything above tests the PARTIAL path, which has computed a CRC since
+// Unit 6.2. The full path never has: its finalization sequence carries two
+// CMD:RCRC writes where a Vivado full bitstream carries two CRC writes, which
+// is bit-for-bit Vivado's BITSTREAM.GENERAL.CRC=DISABLE substitution. H13
+// measured what that costs on silicon -- one flipped configuration bit in a
+// 3.8 MB stream, DONE=1, "No CRC error", and a design running 39x wrong.
+// ============================================================================
+
+// The substitution is TWO words per CRC and touches nothing else. Same shape
+// of assertion as PartialPackageCrcDisableIsATwoWordSubstitution above, and
+// the same reason: if emit_crc were a second code path rather than a
+// substitution, this is where it would show.
+TEST(ConfigurationTest, FullPackageCrcEmissionIsATwoWordSubstitution) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Configuration<Series7>::PacketData data(404, 0xABu);
+
+	Series7::ConfigurationPackage with_crc, without_crc;
+	Configuration<Series7>::createConfigurationPackage(with_crc, data, part,
+	                                                   true);
+	Configuration<Series7>::createConfigurationPackage(without_crc, data,
+	                                                   part, false);
+
+	ASSERT_EQ(with_crc.size(), without_crc.size());
+	auto a = RegSequence(with_crc), b = RegSequence(without_crc);
+	ASSERT_EQ(a.size(), b.size());
+	std::vector<size_t> at;
+	for (size_t i = 0; i < a.size(); ++i)
+		if (a[i] != b[i])
+			at.push_back(i);
+	ASSERT_EQ(at.size(), 2u);
+	for (size_t i : at) {
+		EXPECT_EQ(a[i].first, Series7::ConfRegType::CRC);
+		EXPECT_EQ(b[i].first, Series7::ConfRegType::CMD);
+		EXPECT_EQ(b[i].second,
+		          static_cast<uint32_t>(xc7series::Command::RCRC));
+		EXPECT_NE(a[i].second, 0u);
+	}
+	// And the CRC-disabled default is unchanged by this work: three
+	// CMD:RCRC writes, which is what every full bitstream in the tree was
+	// built with.
+	EXPECT_EQ(CountCmd(without_crc,
+	                   static_cast<uint32_t>(xc7series::Command::RCRC)),
+	          3u);
+	EXPECT_EQ(CountCmd(with_crc,
+	                   static_cast<uint32_t>(xc7series::Command::RCRC)),
+	          1u);
+}
+
+// Each emitted CRC word is the accumulator over the packets that PRECEDE it,
+// and a CRC write resets the accumulator -- so the second value covers only
+// what follows the first. A writer that computed both over the whole stream,
+// or both from zero at the start, would pass the substitution test above and
+// fail here.
+TEST(ConfigurationTest, FullPackageCrcIsTheAccumulatorAtEachWrite) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Configuration<Series7>::PacketData data(404, 0xABu);
+	Series7::ConfigurationPackage pkg;
+	Configuration<Series7>::createConfigurationPackage(pkg, data, part,
+	                                                   true);
+
+	size_t seen = 0;
+	Series7::ConfigurationPackage prefix;
+	for (auto& p : pkg) {
+		const bool is_crc_write =
+		    p->opcode() ==
+		        ConfigurationPacket<Series7::ConfRegType>::Opcode::
+		            Write &&
+		    p->address() == Series7::ConfRegType::CRC &&
+		    !p->data().empty();
+		if (is_crc_write) {
+			++seen;
+			EXPECT_EQ(p->data()[0],
+			          Configuration<Series7>::computeStreamCrc(
+			              prefix))
+			    << "CRC write #" << seen;
+		}
+		// The prefix is a NON-OWNING view: it borrows each packet's
+		// span, and `pkg` outlives it.
+		prefix.emplace_back(
+		    new ConfigurationPacket<Series7::ConfRegType>(
+		        p->header_type(), p->opcode(), p->address(),
+		        p->data()));
+	}
+	EXPECT_EQ(seen, 2u);
+
+	// The two values differ. If they did not, the reset would not be
+	// happening and both would be measuring the same window.
+	std::vector<uint32_t> values;
+	for (auto& p : pkg)
+		if (p->opcode() == ConfigurationPacket<
+		                       Series7::ConfRegType>::Opcode::Write &&
+		    p->address() == Series7::ConfRegType::CRC &&
+		    !p->data().empty())
+			values.push_back(p->data()[0]);
+	ASSERT_EQ(values.size(), 2u);
+	EXPECT_NE(values[0], values[1]);
+}
+
+// THE NEGATIVE CONTROL FOR THE WHOLE UNIT, in one test: change one word of
+// frame data and the FIRST CRC must move. If it does not, the CRC covers
+// nothing that a corrupted transfer can touch and emitting it would be
+// ceremony. (The second CRC accumulates only post-CRC#1 writes, so it must
+// NOT move -- which is the other half of the same claim.)
+TEST(ConfigurationTest, FullPackageCrcMovesWhenOneFrameWordMoves) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Configuration<Series7>::PacketData a(404, 0xABu);
+	Configuration<Series7>::PacketData b = a;
+	b[123] ^= 0x10u;  // one bit, in one word, of the frame data
+
+	auto crcs = [&part](const Configuration<Series7>::PacketData& d) {
+		Series7::ConfigurationPackage pkg;
+		Configuration<Series7>::createConfigurationPackage(pkg, d, part,
+		                                                   true);
+		std::vector<uint32_t> out;
+		for (auto& p : pkg)
+			if (p->opcode() ==
+			        ConfigurationPacket<Series7::ConfRegType>::
+			            Opcode::Write &&
+			    p->address() == Series7::ConfRegType::CRC &&
+			    !p->data().empty())
+				out.push_back(p->data()[0]);
+		return out;
+	};
+	auto ca = crcs(a), cb = crcs(b);
+	ASSERT_EQ(ca.size(), 2u);
+	ASSERT_EQ(cb.size(), 2u);
+	EXPECT_NE(ca[0], cb[0]);
+	EXPECT_EQ(ca[1], cb[1]);
+}

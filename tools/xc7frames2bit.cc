@@ -82,10 +82,28 @@ DEFINE_bool(raw,
             "loaded over JTAG carries IDCODE; a raw ICAP stream does not.");
 DEFINE_string(crc,
               "compute",
-              "compute: compute the stream CRC-32C and write it to the CRC "
-              "register. disable: substitute a CMD:RCRC write, which is "
-              "exactly what Vivado's BITSTREAM.GENERAL.CRC=DISABLE emits -- a "
-              "two-word substitution, not a second code path.");
+              "PARTIAL BITSTREAMS ONLY (--partial_bitstream). compute: "
+              "compute the stream CRC-32C and write it to the CRC register. "
+              "disable: substitute a CMD:RCRC write, which is exactly what "
+              "Vivado's BITSTREAM.GENERAL.CRC=DISABLE emits -- a two-word "
+              "substitution, not a second code path. The FULL path's switch "
+              "is --emit_crc, and it is a separate flag on purpose: this one "
+              "defaults to compute.");
+DEFINE_bool(emit_crc,
+            false,
+            "FULL BITSTREAMS ONLY. Write the stream CRC-32C into the CRC "
+            "register at the two positions a Vivado full bitstream uses -- "
+            "after the frame data and before CMD:DESYNC -- instead of the two "
+            "CMD:RCRC writes this tool has always emitted there. Those two "
+            "CMD:RCRC writes ARE Vivado's CRC=DISABLE substitution, so every "
+            "full bitstream from this tool is a CRC-DISABLED bitstream and "
+            "the device's own corruption check never runs on it: measured on "
+            "silicon, a single flipped configuration bit in a 3.8 MB stream "
+            "loads to DONE=1 with 'No CRC error' and runs 39x wrong "
+            "(docs/h13-hardware-negative-controls.md). OFF BY DEFAULT because "
+            "turning it on changes the payload of every full bitstream this "
+            "toolchain builds, and hundreds of recorded payload hashes "
+            "identify artefacts by exactly that payload.");
 DEFINE_bool(verify,
             true,
             "Read the emitted bitstream back through the bitstream READER and "
@@ -640,7 +658,8 @@ struct Frames2BitWriter {
 			xilinx::Configuration<ArchType>::
 			    createConfigurationPackage(
 			        configuration_package,
-			        configuration_packet_data, part);
+			        configuration_packet_data, part,
+			        FLAGS_emit_crc);
 
 			// Write bitstream
 			auto bitstream_writer =
@@ -670,6 +689,16 @@ struct Frames2BitWriter {
 int main(int argc, char* argv[]) {
 	gflags::SetUsageMessage(argv[0]);
 	gflags::ParseCommandLineFlags(&argc, &argv, true);
+	// A flag that silently does nothing is a check that never runs. --crc
+	// steers the partial path and --emit_crc steers the full one; asking
+	// for the wrong one is a refusal, not a no-op.
+	if (FLAGS_emit_crc && FLAGS_partial_bitstream) {
+		std::cerr << "--emit_crc is the FULL bitstream switch. A "
+		             "partial bitstream's CRC is controlled by --crc, "
+		             "which already defaults to compute."
+		          << std::endl;
+		return 1;
+	}
 	xilinx::Architecture::Container arch_container =
 	    xilinx::ArchitectureFactory::create_architecture(
 	        FLAGS_architecture);
