@@ -318,6 +318,19 @@ class FasmAssembler(object):
         for line in extra_features:
             self.add_fasm_line(line, missing_features)
 
+        # Report ROI violations as soon as the input is exhausted, so the
+        # message points at the FASM rather than at frame arithmetic.
+        # get_frames() checks again for the injection sites that run later.
+        #
+        # This runs BEFORE the missing-feature block because that block's
+        # XRAY_ALLOW_MISSING_FEATURES path ends in a bare `return`: below it,
+        # a missing feature plus the hatch would silently skip the ROI check.
+        # check_roi() is idempotent and cheap, so the position costs nothing.
+        # The only visible effect is precedence -- an input that is both
+        # out-of-ROI and missing features now reports the ROI violation, which
+        # is the more serious of the two.
+        self.check_roi()
+
         if missing_features:
             # Allow the assembler to keep going when only a small number of
             # niche segbits (e.g. IOB_Y1.IBUF_HP_BANK_GLUE — not yet fuzzed
@@ -335,11 +348,6 @@ class FasmAssembler(object):
                     print("  " + m, file=sys.stderr)
                 return
             raise FasmLookupError('\n'.join(missing_features))
-
-        # Report ROI violations as soon as the input is exhausted, so the
-        # message points at the FASM rather than at frame arithmetic.
-        # get_frames() checks again for the injection sites that run later.
-        self.check_roi()
 
     def mark_roi_frames(self, roi, strict=False):
         '''Seed frames_in_use with every frame the ROI's tiles occupy.
