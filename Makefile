@@ -272,6 +272,20 @@ db-extras-zynq7-harness:
 db-check:
 	@true
 
+# Whole-root, not per-family. db-check expands once per entry of DATABASES
+# (Makefile:139, which does not list virtex7) and utils/checkdb.py:154 takes a
+# single family's db_root, so nothing under db-check can compare two families
+# against each other -- which is the only way to see an address translation that
+# is wrong in exactly one of them. Deliberately not run through $(IN_ENV): this
+# check imports nothing outside the standard library, and making it need the
+# venv would give away the property that lets it run on a bare CI runner.
+DB_ROOT ?= database
+db-crossfam:
+	python3 utils/crossfam_check.py --db-root $(DB_ROOT)
+
+db-crossfam-self-test:
+	python3 utils/crossfam_check.py --self-test --db-root $(DB_ROOT)
+
 db-format:
 	@true
 
@@ -280,7 +294,7 @@ db-info:
 
 db-prepare-parts: $(addprefix db-prepare-,$(DATABASES))
 
-.PHONY: db-check db-format
+.PHONY: db-check db-format db-crossfam db-crossfam-self-test
 
 clean:
 	$(MAKE) -C database clean
