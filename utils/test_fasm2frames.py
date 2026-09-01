@@ -20,6 +20,9 @@ import tempfile
 from unittest import mock
 
 import prjxray
+from prjxray import fasm_assembler
+from prjxray.db import Database
+from prjxray.roi import Roi
 import utils.fasm2frames as fasm2frames
 from prjxray.util import OpenSafeFile
 
@@ -269,6 +272,32 @@ class TestExitContract(unittest.TestCase):
         rc, size = self.run_main('CLBLM_L_X10Y102.SLICEM_X0.NO_SUCH_FEATURE')
         self.assertEqual(rc, 1)
         self.assertIsNone(size)
+
+
+class TestRoiPrecedence(unittest.TestCase):
+    def test_roi_violation_is_not_hidden_by_allowed_missing_features(self):
+        db = Database(
+            os.path.join(os.path.dirname(__file__), 'test_data', 'db'),
+            'xc7a200tffg1156-1')
+        loc = db.grid().loc_of_tilename('CLBLM_L_X10Y102')
+        assembler = fasm_assembler.FasmAssembler(db)
+        assembler.mark_roi_frames(
+            Roi(db=db,
+                x1=loc.grid_x,
+                x2=loc.grid_x,
+                y1=loc.grid_y,
+                y2=loc.grid_y),
+            strict=True)
+
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write(
+                'CLBLM_L_X10Y102.SLICEM_X0.NO_SUCH_FEATURE\n'
+                'INT_L_X10Y102.BYP_ALT0.EE2END0\n')
+            fin.flush()
+            with mock.patch.dict(os.environ,
+                                 {'XRAY_ALLOW_MISSING_FEATURES': '1'}):
+                with self.assertRaises(fasm_assembler.FasmRoiViolation):
+                    assembler.parse_fasm_filename(fin.name)
 
 
 if __name__ == '__main__':
