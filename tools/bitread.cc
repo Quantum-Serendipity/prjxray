@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include <iostream>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
