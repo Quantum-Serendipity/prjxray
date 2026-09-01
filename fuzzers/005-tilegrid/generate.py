@@ -84,9 +84,25 @@ def load_pin_functions(pin_func_fn):
 
     with open(pin_func_fn) as f:
         for line in f:
-            site, pin_func = line.split()
+            # One site can own more than one package pin, and generate_tiles.tcl
+            # writes `$site [get_property PIN_FUNC $package_pins]` -- a Tcl list,
+            # so the line gains a field per pin. On Vivado 2017.2 that never
+            # happened for xc7a50t: the committed tilegrid.json has 136 tiles
+            # carrying pin_functions and not one of them is a GT site, because
+            # `get_package_pins -of_objects` returned nothing for them. Vivado
+            # 2025.2 resolves them, and xc7a50tfgg484-1 then emits six wide
+            # lines -- four per GTPE2_CHANNEL, two per IBUFDS_GTE2 -- on which
+            # the two-name unpack raised
+            #     ValueError: too many values to unpack (expected 2, got 5)
+            # and took the whole tilegrid build with it.
+            #
+            # Join rather than pick: for the 272 single-pin sites this is
+            # byte-identical to the old behaviour, and for the six it keeps what
+            # Vivado said instead of silently choosing one of four.
+            site, *funcs = line.split()
+            assert funcs, line
             assert site not in pin_functions, site
-            pin_functions[site] = pin_func
+            pin_functions[site] = ' '.join(funcs)
 
     return pin_functions
 

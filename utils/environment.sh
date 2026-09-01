@@ -46,11 +46,19 @@ export XRAY_PARSEDB="python3 ${XRAY_UTILS_DIR}/parsedb.py"
 export XRAY_TCL_REFORMAT="${XRAY_UTILS_DIR}/tcl-reformat.sh"
 export XRAY_VIVADO="${XRAY_UTILS_DIR}/vivado.sh"
 
-# Verify an approved version is in use
+# Verify an approved version is in use.
+#
+# The approved version is still 2017.2 and the default below is unchanged: an
+# environment that sets nothing gets upstream's behaviour, including the
+# XRAY_DIR poisoning. XRAY_VIVADO_VERSION exists so a *probe* can point the
+# same harness at another install without editing this file -- the retarget
+# question (2025.2) is a measurement, and a measurement that needs a source
+# edit does not get re-run. Set it to the exact banner token, e.g. `v2025.2`.
 export XRAY_VIVADO_SETTINGS="${XRAY_VIVADO_SETTINGS:-/opt/Xilinx/Vivado/2017.2/settings64.sh}"
+export XRAY_VIVADO_VERSION="${XRAY_VIVADO_VERSION:-v2017.2}"
 # Vivado v2017.2 (64-bit)
-if [ "$(${XRAY_VIVADO} -h |grep Vivado |cut -d\  -f 2)" != "v2017.2" ] ; then
-    echo "Requires Vivado 2017.2. See https://github.com/SymbiFlow/prjxray/issues/14"
+if [ "$(${XRAY_VIVADO} -h |grep Vivado |cut -d\  -f 2)" != "${XRAY_VIVADO_VERSION}" ] ; then
+    echo "Requires Vivado ${XRAY_VIVADO_VERSION#v}. See https://github.com/SymbiFlow/prjxray/issues/14"
     # Can't exit since sourced script
     # Trash a key environment variable to preclude use
     export XRAY_DIR="/bad/vivado/version"

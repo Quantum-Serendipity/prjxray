@@ -1,0 +1,5 @@
+ERROR: [Common 17-39] 'write_bitstream' failed due to earlier errors.
+ERROR: [DRC PDRC-2] BSCAN_JtagChain: Unsupported programming for BSCAN site BSCAN_X0Y0 and JTAG_CHAIN attribute value 2. The JTAG_CHAIN attribute must be changed or the programming for the BSCAN cell must be moved to a site corresponding to the JTAG_CHAIN attribute setting.
+ERROR: [DRC PDRC-2] BSCAN_JtagChain: Unsupported programming for BSCAN site BSCAN_X0Y0 and JTAG_CHAIN attribute value 3. The JTAG_CHAIN attribute must be changed or the programming for the BSCAN cell must be moved to a site corresponding to the JTAG_CHAIN attribute setting.
+ERROR: [Vivado 12-1345] Error(s) found during DRC. Bitgen not run.
+ERROR: [DRC PDRC-2] BSCAN_JtagChain: Unsupported programming for BSCAN site BSCAN_X0Y0 and JTAG_CHAIN attribute value 2. The JTAG_CHAIN attribute must be changed or the programming for the BSCAN cell must be moved to a site corresponding to the JTAG_CHAIN attribute setting.
