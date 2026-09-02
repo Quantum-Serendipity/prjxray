@@ -13,6 +13,7 @@ from __future__ import print_function
 
 import fasm
 import argparse
+import contextlib
 import json
 import os
 import os.path
@@ -658,6 +659,15 @@ def main():
     args = parser.parse_args()
 
     f_out = open(args.fn_out, 'w') if args.fn_out else sys.stdout
+
+    def discard_output():
+        if not args.fn_out:
+            return
+        with contextlib.suppress(OSError):
+            f_out.close()
+        with contextlib.suppress(OSError):
+            os.remove(args.fn_out)
+
     try:
         run(
             db_root=args.db_root,
@@ -669,24 +679,16 @@ def main():
             roi_strict=args.roi_strict,
             debug=args.debug,
             emit_pudc_b_pullup=args.emit_pudc_b_pullup)
-    except (fasm_assembler.FasmRoiViolation, ValueError) as e:
-        # Exit 1 with the diagnostic on stderr rather than a traceback: this
-        # is bad input, not a crash, and the calling flow needs a status code
-        # it can branch on.
-        #
-        # Deleting the output file matters as much as the exit code. open(...,
-        # 'w') truncated it before run() was ever entered, so bailing out
-        # without this leaves a zero-length .frm on disk that xc7frames2bit
-        # will happily turn into an empty bitstream -- the same silent-success
-        # failure mode --roi-strict exists to remove.
         if args.fn_out:
             f_out.close()
-            try:
-                os.remove(args.fn_out)
-            except OSError:
-                pass
+    except (fasm_assembler.FasmRoiViolation, fasm_assembler.FasmLookupError,
+            fasm_assembler.FasmInconsistentBits, ValueError) as e:
+        discard_output()
         eprint('ERROR: %s' % e)
         return 1
+    except BaseException:
+        discard_output()
+        raise
     return 0
 
 

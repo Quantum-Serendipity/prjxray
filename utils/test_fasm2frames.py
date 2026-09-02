@@ -14,8 +14,10 @@ from io import StringIO
 import os
 import os.path
 import re
+import sys
 import unittest
 import tempfile
+from unittest import mock
 
 import prjxray
 import utils.fasm2frames as fasm2frames
@@ -235,6 +237,38 @@ CLBLM_L_X10Y102.SLICEM_X0.SRUSEDMUX 1
                 'LIOI_X2Y10.OLOGIC_Y1.ZINV_CLK\n'))
         self.assertIn(self.HP_OQUSED, bits)
         self.assertNotIn(self.HP_OMUX_D1, bits)
+
+
+class TestExitContract(unittest.TestCase):
+    def run_main(self, fasm_text):
+        with tempfile.TemporaryDirectory() as d:
+            fn_in = os.path.join(d, 'in.fasm')
+            fn_out = os.path.join(d, 'out.frm')
+            with open(fn_in, 'w') as f:
+                f.write(fasm_text + '\n')
+
+            argv = [
+                'fasm2frames.py', '--db-root',
+                os.path.join(os.path.dirname(__file__), 'test_data', 'db'),
+                '--part', 'xc7a200tffg1156-1', fn_in, fn_out
+            ]
+            with mock.patch.object(sys, 'argv', argv):
+                rc = fasm2frames.main()
+
+            if not os.path.exists(fn_out):
+                return rc, None
+            return rc, os.path.getsize(fn_out)
+
+    def test_success_leaves_output(self):
+        rc, size = self.run_main('CLBLM_L_X10Y102.SLICEM_X0.SRUSEDMUX')
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(size)
+        self.assertGreater(size, 0)
+
+    def test_lookup_error_leaves_no_output(self):
+        rc, size = self.run_main('CLBLM_L_X10Y102.SLICEM_X0.NO_SUCH_FEATURE')
+        self.assertEqual(rc, 1)
+        self.assertIsNone(size)
 
 
 if __name__ == '__main__':
