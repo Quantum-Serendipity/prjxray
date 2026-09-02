@@ -135,7 +135,7 @@ def add_tile_bits(
             if not block["offset"] == offset:
                 print("XXX Hack: %s; orig offset %s, new %s" % (tile_name, block["offset"], offset))
                 offset = max(block['offset'], offset)
-                print("XXX Hack: using offset {offset}")
+                print("XXX Hack: using offset %s" % offset)
                 done = False
         else:
             assert block["offset"] == offset, "%s; orig offset %s, new %s" % (
