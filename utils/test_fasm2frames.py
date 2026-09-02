@@ -14,6 +14,7 @@ from io import StringIO
 import os
 import os.path
 import re
+import sys
 import unittest
 import tempfile
 
@@ -185,6 +186,71 @@ CLBLM_L_X10Y102.SLICEM_X0.SRUSEDMUX 1
     def test_stepdown_2(self):
         self.bitread_frm_equals(
             'iob/riob_stepdown.fasm', 'iob/riob_stepdown.bits')
+
+
+class TestExitContract(unittest.TestCase):
+    '''A failed run must leave nothing the next stage can consume.
+
+    Every test above calls run() with a StringIO, so none of them can see the
+    contract that matters at the command line: fn_out is opened 'w' before any
+    work happens, so an exception that escapes main()'s handler leaves a
+    zero-length .frm on disk. That file is not inert -- xc7frames2bit reads one
+    at rc 0. Measured 2026-09-01 on xc7vx485tffg1761-2: a 0-byte .frm produced
+    a 20,273,632-byte .bit, 861 bytes of it non-zero (sync word, header,
+    commands, CRC), and the tool reported "--verify round-trip OK, 50148
+    frames, ECC included". An all-zero configuration, from a run that failed.
+
+    FasmLookupError is the class that escaped, and it is what every virtex7
+    CFG_CENTER_MID feature raises today, because that tile carries "bits": {}.
+
+    Both directions run here. A test that only asserts "no file after a
+    failure" passes against a build that never writes one.
+    '''
+
+    def db_root(self):
+        return os.path.join(os.path.dirname(__file__), 'test_data', 'db')
+
+    def run_main(self, fasm_text):
+        '''Drive main(), not run(): the exit contract lives in main().
+
+        Returns (rc, exists, size). size is None when the file is absent.
+        '''
+        d = tempfile.mkdtemp()
+        fn_in = os.path.join(d, 'in.fasm')
+        fn_out = os.path.join(d, 'out.frm')
+        with open(fn_in, 'w') as f:
+            f.write(fasm_text + '\n')
+
+        saved_argv = sys.argv
+        sys.argv = [
+            'fasm2frames.py', '--db-root',
+            self.db_root(), '--part', 'xc7a200tffg1156-1', fn_in, fn_out
+        ]
+        try:
+            rc = fasm2frames.main()
+        finally:
+            sys.argv = saved_argv
+
+        exists = os.path.exists(fn_out)
+        return rc, exists, (os.path.getsize(fn_out) if exists else None)
+
+    def test_exit_contract_success_leaves_output(self):
+        '''Positive control, same shape and same run as the negative below.'''
+        rc, exists, size = self.run_main(
+            'CLBLM_L_X10Y102.SLICEM_X0.SRUSEDMUX')
+        self.assertEqual(rc, 0)
+        self.assertTrue(exists, 'a successful run must leave its .frm')
+        self.assertGreater(size, 0)
+
+    def test_exit_contract_lookup_error_leaves_no_output(self):
+        '''The failure that escaped: a feature the segbits do not carry.'''
+        rc, exists, size = self.run_main(
+            'CLBLM_L_X10Y102.SLICEM_X0.NO_SUCH_FEATURE')
+        self.assertEqual(
+            rc, 1, 'FasmLookupError must be a status code, not a traceback')
+        self.assertFalse(
+            exists, 'a failed run left %r bytes at the output path; '
+            'xc7frames2bit accepts a 0-byte .frm at rc 0' % (size, ))
 
 
 if __name__ == '__main__':

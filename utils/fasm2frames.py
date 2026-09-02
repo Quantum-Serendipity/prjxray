@@ -536,6 +536,26 @@ def main():
     args = parser.parse_args()
 
     f_out = open(args.fn_out, 'w') if args.fn_out else sys.stdout
+
+    def discard_output():
+        # open(..., 'w') truncated fn_out before run() was ever entered, so any
+        # exit that is not a clean return leaves a zero-length .frm on disk.
+        # xc7frames2bit reads one at rc 0: measured 2026-09-01 on
+        # xc7vx485tffg1761-2, a 0-byte .frm produced a 20,273,632-byte .bit of
+        # which 861 bytes are non-zero (sync word, header, commands, CRC) and
+        # the tool reported "--verify round-trip OK, 50148 frames, ECC
+        # included". A failed run must leave nothing the next stage can consume.
+        if not args.fn_out:
+            return
+        try:
+            f_out.close()
+        except OSError:
+            pass
+        try:
+            os.remove(args.fn_out)
+        except OSError:
+            pass
+
     try:
         run(
             db_root=args.db_root,
@@ -547,24 +567,34 @@ def main():
             roi_strict=args.roi_strict,
             debug=args.debug,
             emit_pudc_b_pullup=args.emit_pudc_b_pullup)
-    except (fasm_assembler.FasmRoiViolation, ValueError) as e:
+        # Closed inside the try so that a write that fails only at flush time --
+        # ENOSPC is the realistic one -- is a failed run and gets the same
+        # treatment as any other, rather than a rc 0 beside a truncated file.
+        if args.fn_out:
+            f_out.close()
+    except (fasm_assembler.FasmRoiViolation, fasm_assembler.FasmLookupError,
+            fasm_assembler.FasmInconsistentBits, ValueError) as e:
         # Exit 1 with the diagnostic on stderr rather than a traceback: this
         # is bad input, not a crash, and the calling flow needs a status code
         # it can branch on.
         #
-        # Deleting the output file matters as much as the exit code. open(...,
-        # 'w') truncated it before run() was ever entered, so bailing out
-        # without this leaves a zero-length .frm on disk that xc7frames2bit
-        # will happily turn into an empty bitstream -- the same silent-success
-        # failure mode --roi-strict exists to remove.
-        if args.fn_out:
-            f_out.close()
-            try:
-                os.remove(args.fn_out)
-            except OSError:
-                pass
+        # FasmLookupError and FasmInconsistentBits are named here because they
+        # were not: both subclass Exception (fasm_assembler.py:17,21), so the
+        # pair (FasmRoiViolation, ValueError) let them escape as an uncaught
+        # traceback -- past the cleanup below, which is why the 0-byte .frm
+        # described in discard_output() was reachable at all. FasmLookupError
+        # is what every virtex7 CFG_CENTER_MID feature raises today.
+        discard_output()
         eprint('ERROR: %s' % e)
         return 1
+    except BaseException:
+        # Anything else -- a genuine crash, KeyboardInterrupt, a class added to
+        # fasm_assembler after this line was written. The traceback is still
+        # the report, so it is re-raised unchanged; what must not survive is
+        # the artefact. Naming exception classes one at a time is how the
+        # previous version of this handler went stale.
+        discard_output()
+        raise
     return 0
 
 
