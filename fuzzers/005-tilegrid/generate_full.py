@@ -519,6 +519,13 @@ def propagate_IOI_Y9(database, tiles_by_grid):
     ioi_tiles = os.getenv('XRAY_IOI3_TILES')
 
     assert ioi_tiles is not None, "XRAY_IOI3_TILES env variable not set"
+    # An empty setting means "this part has no shifted IOI3", not "propagate
+    # nothing named". settings/kintex7_420t.sh exports XRAY_IOI3_TILES="" and
+    # "".split(" ") is [""], so without this the loop below indexes
+    # database[""] and dies with KeyError: ''.
+    if ioi_tiles.strip() == '':
+        return
+
     tiles = ioi_tiles.split(" ")
 
     for tile in tiles:
