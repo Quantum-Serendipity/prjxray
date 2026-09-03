@@ -23,6 +23,7 @@
 #include <prjxray/xilinx/frames.h>
 #include <prjxray/xilinx/nop_packet.h>
 #include <prjxray/xilinx/xc7series/command.h>
+#include <prjxray/xilinx/xc7series/configuration_options_1_value.h>
 #include <prjxray/xilinx/xc7series/ecc.h>
 #include <prjxray/xilinx/xc7series/prepass_geometry.h>
 #include <yaml-cpp/yaml.h>
@@ -1455,10 +1456,12 @@ TEST(ConfigurationTest, FullPackageCrcEmissionIsATwoWordSubstitution) {
 	Configuration<Series7>::PacketData data(404, 0xABu);
 
 	Series7::ConfigurationPackage with_crc, without_crc;
+	FullStreamOptions crc_on, crc_off;
+	crc_on.emit_crc = true;
 	Configuration<Series7>::createConfigurationPackage(with_crc, data, part,
-	                                                   true);
+	                                                   crc_on);
 	Configuration<Series7>::createConfigurationPackage(without_crc, data,
-	                                                   part, false);
+	                                                   part, crc_off);
 
 	ASSERT_EQ(with_crc.size(), without_crc.size());
 	auto a = RegSequence(with_crc), b = RegSequence(without_crc);
@@ -1495,8 +1498,10 @@ TEST(ConfigurationTest, FullPackageCrcIsTheAccumulatorAtEachWrite) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
 	Configuration<Series7>::PacketData data(404, 0xABu);
 	Series7::ConfigurationPackage pkg;
+	FullStreamOptions crc_on;
+	crc_on.emit_crc = true;
 	Configuration<Series7>::createConfigurationPackage(pkg, data, part,
-	                                                   true);
+	                                                   crc_on);
 
 	size_t seen = 0;
 	Series7::ConfigurationPackage prefix;
@@ -1549,8 +1554,10 @@ TEST(ConfigurationTest, FullPackageCrcMovesWhenOneFrameWordMoves) {
 
 	auto crcs = [&part](const Configuration<Series7>::PacketData& d) {
 		Series7::ConfigurationPackage pkg;
+		FullStreamOptions crc_on;
+		crc_on.emit_crc = true;
 		Configuration<Series7>::createConfigurationPackage(pkg, d, part,
-		                                                   true);
+		                                                   crc_on);
 		std::vector<uint32_t> out;
 		for (auto& p : pkg)
 			if (p->opcode() ==
@@ -1566,4 +1573,168 @@ TEST(ConfigurationTest, FullPackageCrcMovesWhenOneFrameWordMoves) {
 	ASSERT_EQ(cb.size(), 2u);
 	EXPECT_NE(ca[0], cb[0]);
 	EXPECT_EQ(ca[1], cb[1]);
+}
+
+// ============================================================================
+// COR1, AND THE ONE BIT IN IT THAT DECIDES WHETHER ANYTHING ON THE DIE IS
+// WATCHING CONFIGURATION MEMORY.
+//
+// The full-bitstream writer wrote COR1 = 0x00000000 from a literal, so
+// COR1[8] RBCRC_EN -- UG470 ch. 8's continuous background readback, the only
+// mechanism that can see an upset in a region that is running and is never
+// reloaded -- could not be requested from this flow at all. These tests hold
+// the two halves apart: the default emission must not have moved, and the
+// override must reach exactly one word.
+// ============================================================================
+
+// A one-word substitution, and nothing else in the stream moves. Same shape as
+// FullPackageCrcEmissionIsATwoWordSubstitution above, and the same reason: if
+// the override were a second code path rather than a substituted operand, this
+// is where it would show.
+TEST(ConfigurationTest, FullPackageCor1IsAOneWordSubstitution) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Configuration<Series7>::PacketData data(404, 0xABu);
+
+	FullStreamOptions off, on;
+	on.cor1 = xc7series::ConfigurationOptions1Value()
+	              .SetContinuousReadbackCrc(true)
+	              .SetReadbackCrcAction(
+	                  xc7series::ConfigurationOptions1Value::
+	                      ReadbackCrcAction::CorrectAndContinue);
+
+	Series7::ConfigurationPackage with, without;
+	Configuration<Series7>::createConfigurationPackage(with, data, part,
+	                                                   on);
+	Configuration<Series7>::createConfigurationPackage(without, data, part,
+	                                                   off);
+
+	ASSERT_EQ(with.size(), without.size());
+	auto a = RegSequence(with), b = RegSequence(without);
+	ASSERT_EQ(a.size(), b.size());
+	std::vector<size_t> at;
+	for (size_t i = 0; i < a.size(); ++i)
+		if (a[i] != b[i])
+			at.push_back(i);
+	ASSERT_EQ(at.size(), 1u);
+	EXPECT_EQ(a[at[0]].first, Series7::ConfRegType::COR1);
+	EXPECT_EQ(b[at[0]].first, Series7::ConfRegType::COR1);
+	// 0x00010100: bit 8 RBCRC_EN, bits 16:15 = 0b10 Correct_And_Continue.
+	EXPECT_EQ(a[at[0]].second, 0x00010100u);
+	EXPECT_EQ(b[at[0]].second, 0x00000000u);
+}
+
+// The DEFAULT is the artefact-preserving half, and it is asserted on its own
+// because every recorded payload hash in the consuming project identifies a
+// full bitstream by exactly this word. Exactly one COR1 write, value zero.
+TEST(ConfigurationTest, FullPackageCor1DefaultsToZero) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	Configuration<Series7>::PacketData data(404, 0xABu);
+	Series7::ConfigurationPackage pkg;
+	Configuration<Series7>::createConfigurationPackage(pkg, data, part,
+	                                                   FullStreamOptions());
+
+	size_t writes = 0;
+	for (auto& e : RegSequence(pkg))
+		if (e.first == Series7::ConfRegType::COR1) {
+			++writes;
+			EXPECT_EQ(e.second, 0x00000000u);
+		}
+	EXPECT_EQ(writes, 1u);
+}
+
+// UG470 Table 5-33, field by field. Written as literal expected words rather
+// than as an expression over the same shifts the builder uses, because a test
+// that recomputes the implementation proves only that it is self-consistent.
+//
+// RBCRC_ACTION IS THE ONE THAT CAN BE WRONG SILENTLY: the encoding is
+// 00 Continue, 01 Halt, 11 Correct_And_Halt, 10 Correct_And_Continue, so the
+// two "correct" actions are NOT in the order a reader assumes.
+TEST(ConfigurationTest, Cor1FieldsMatchUg470Table533) {
+	using V = xc7series::ConfigurationOptions1Value;
+	using Action = V::ReadbackCrcAction;
+
+	EXPECT_EQ(static_cast<uint32_t>(V()), 0x00000000u);
+
+	EXPECT_EQ(static_cast<uint32_t>(V().SetContinuousReadbackCrc(true)),
+	          0x00000100u);
+	EXPECT_EQ(
+	    static_cast<uint32_t>(V().SetReadbackCrcErrorPinDisabled(true)),
+	    0x00000200u);
+	EXPECT_EQ(static_cast<uint32_t>(V().SetPersistDeassertAtDesync(true)),
+	          0x00020000u);
+
+	EXPECT_EQ(
+	    static_cast<uint32_t>(V().SetReadbackCrcAction(Action::Continue)),
+	    0x00000000u);
+	EXPECT_EQ(static_cast<uint32_t>(V().SetReadbackCrcAction(Action::Halt)),
+	          0x00008000u);
+	EXPECT_EQ(static_cast<uint32_t>(
+	              V().SetReadbackCrcAction(Action::CorrectAndContinue)),
+	          0x00010000u);
+	EXPECT_EQ(static_cast<uint32_t>(
+	              V().SetReadbackCrcAction(Action::CorrectAndHalt)),
+	          0x00018000u);
+
+	EXPECT_EQ(static_cast<uint32_t>(
+	              V().SetBpiFirstReadCycle(V::BpiFirstReadCycle::Cclk4)),
+	          0x0000000Cu);
+	EXPECT_EQ(
+	    static_cast<uint32_t>(V().SetBpiPageSize(V::BpiPageSize::Bytes8)),
+	    0x00000002u);
+
+	// The fields are disjoint: setting all six leaves each one's bits
+	// where they were. A builder whose shifts overlapped would pass every
+	// single-field assertion above and fail here.
+	//
+	// 0x0003830E is the OR of the six words asserted individually above:
+	// 0x20000 | 0x18000 | 0x200 | 0x100 | 0xC | 0x2. It is written out
+	// rather than expressed as that OR because the point is to check the
+	// builder against the register, not against itself -- and the first
+	// draft of this line said 0x0001A30E, which is that same OR done
+	// wrong by hand and is what this assertion caught.
+	EXPECT_EQ(static_cast<uint32_t>(
+	              V().SetPersistDeassertAtDesync(true)
+	                  .SetReadbackCrcAction(Action::CorrectAndHalt)
+	                  .SetReadbackCrcErrorPinDisabled(true)
+	                  .SetContinuousReadbackCrc(true)
+	                  .SetBpiFirstReadCycle(V::BpiFirstReadCycle::Cclk4)
+	                  .SetBpiPageSize(V::BpiPageSize::Bytes8)),
+	          0x0003830Eu);
+}
+
+// The knob is Series7-only and says so by refusing. UltraScale's COR1 default
+// in this writer is 0x00400000 with a UG570 layout nobody here has measured;
+// accepting a 7-series field pattern into it would emit a plausible-looking
+// guess at exit 0, which is the defect class this whole file exists to close.
+TEST(ConfigurationTest, Cor1OverrideIsRefusedOnUltraScale) {
+	// UltraScale derives from Series7, so UltraScale::Part IS
+	// xc7series::Part and the same fixture serves. Only the register
+	// literals and the frame width differ, and neither is exercised here.
+	auto part = absl::optional<UltraScale::Part>(MakeTestPart());
+	Configuration<UltraScale>::PacketData data(123, 0xABu);
+
+	FullStreamOptions on;
+	on.cor1 = 0x100u;
+	UltraScale::ConfigurationPackage pkg;
+	EXPECT_THROW(Configuration<UltraScale>::createConfigurationPackage(
+	                 pkg, data, part, on),
+	             std::runtime_error);
+
+	// The other direction: with the option unset the same call is fine and
+	// still writes UltraScale's own literal. A refusal-only test would pass
+	// on a writer that threw unconditionally.
+	UltraScale::ConfigurationPackage ok;
+	EXPECT_NO_THROW(Configuration<UltraScale>::createConfigurationPackage(
+	    ok, data, part, FullStreamOptions()));
+	size_t writes = 0;
+	for (auto& p : ok)
+		if (p->opcode() ==
+		        ConfigurationPacket<
+		            UltraScale::ConfRegType>::Opcode::Write &&
+		    p->address() == UltraScale::ConfRegType::COR1 &&
+		    !p->data().empty()) {
+			++writes;
+			EXPECT_EQ(p->data()[0], 0x400000u);
+		}
+	EXPECT_EQ(writes, 1u);
 }

@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include <absl/types/optional.h>
 #include <absl/types/span.h>
 
 #include <prjxray/bit_ops.h>
@@ -83,6 +84,42 @@ struct PartialStreamOptions {
 	unsigned int trailing_nops = 16;
 };
 
+// Knobs on the emitted FULL-bitstream packet stream. Every default reproduces,
+// byte for byte, the stream this writer emitted before the struct existed:
+// `emit_crc` was already a parameter and its default is unchanged, and an
+// unset `cor1` leaves each architecture's own literal in place.
+//
+// WHY `cor1` IS AN optional AND NOT A uint32_t WITH A DEFAULT. The three
+// full-bitstream writers put three different literals in their COR1 write --
+// Series7 0x00000000, UltraScale and UltraScale+ 0x00400000 -- and COR1 is not
+// even the same register across them (Spartan6 numbers it 0x0a and UG380 gives
+// it an unrelated layout). A plain uint32_t would need one default, and any
+// choice of default silently rewrites two of the three streams. Unset means
+// "whatever this architecture already wrote", which is the only value that
+// cannot move an existing artefact.
+struct FullStreamOptions {
+	// Write the stream CRC into the CRC register at the two positions a
+	// Vivado full bitstream uses, instead of the two CMD:RCRC writes that
+	// are Vivado's BITSTREAM.GENERAL.CRC=DISABLE substitution.
+	bool emit_crc = false;
+
+	// The word written to COR1. SERIES7 ONLY -- the other three
+	// specializations throw if it is set, because their COR1 layout has
+	// never been characterised here and emitting a 7-series field pattern
+	// into a UG570 register would be a plausible-looking guess.
+	//
+	// Build it with xc7series::ConfigurationOptions1Value rather than by
+	// hand; UG470 Table 5-33's RBCRC_ACTION encoding is 00/01/11/10, which
+	// is exactly the shape a hand-written constant gets wrong.
+	//
+	// COR1 IS WRITTEN BY THE FULL PATH AND BY NOTHING ELSE. The Series7
+	// PARTIAL writer touches CMD, IDCODE, MASK, CTL0, FAR, FDRI, CRC and
+	// nothing more, so a partial reconfiguration neither sets nor clears
+	// these bits: whatever the full bitstream established persists across
+	// every partial load that follows it.
+	absl::optional<uint32_t> cor1;
+};
+
 template <typename ArchType>
 class Configuration {
        public:
@@ -103,28 +140,34 @@ class Configuration {
 	// The programming sequence for Series-7 is taken from
 	// https://www.kc8apf.net/2018/05/unpacking-xilinx-7-series-bitstreams-part-2/
 	//
-	// emit_crc = false (the default, and what every stream this writer has
-	// ever emitted does): the finalization sequence carries TWO CMD:RCRC
-	// writes and NO write to the CRC register, so the device's own CRC
-	// comparison never runs. That is bit-for-bit what Vivado's
+	// options.emit_crc = false (the default, and what every stream this
+	// writer has ever emitted does): the finalization sequence carries TWO
+	// CMD:RCRC writes and NO write to the CRC register, so the device's own
+	// CRC comparison never runs. That is bit-for-bit what Vivado's
 	// BITSTREAM.GENERAL.CRC=DISABLE emits.
 	//
-	// emit_crc = true: each of those two CMD:RCRC writes is replaced, in
-	// place, by a Type-1 write of computeStreamCrc() over everything that
-	// precedes it. The two positions are not chosen -- they are where a
-	// Vivado full bitstream for this family puts its two CRC writes:
-	// immediately after the frame data and immediately before CMD:DESYNC.
-	// A two-word substitution per CRC, exactly as on the partial path;
-	// nothing else in the stream moves.
+	// options.emit_crc = true: each of those two CMD:RCRC writes is
+	// replaced, in place, by a Type-1 write of computeStreamCrc() over
+	// everything that precedes it. The two positions are not chosen -- they
+	// are where a Vivado full bitstream for this family puts its two CRC
+	// writes: immediately after the frame data and immediately before
+	// CMD:DESYNC. A two-word substitution per CRC, exactly as on the
+	// partial path; nothing else in the stream moves.
 	//
 	// It is OPT-IN, and deliberately so. Flipping the default would change
 	// the payload of every full bitstream this toolchain has ever built and
 	// invalidate every recorded payload hash that identifies one.
+	//
+	// options.cor1 is the same shape of knob one register along, and it is
+	// what makes COR1[8] RBCRC_EN -- the device's own continuous readback
+	// of configuration memory -- reachable at all. Unset leaves each
+	// architecture's existing literal, so the default emission is
+	// unchanged; see FullStreamOptions.
 	static void createConfigurationPackage(
 	    typename ArchType::ConfigurationPackage& out_packets,
 	    const PacketData& packet_data,
 	    absl::optional<typename ArchType::Part>& part,
-	    bool emit_crc);
+	    const FullStreamOptions& options);
 
 	// The payload of a partial bitstream, DERIVED FROM THE INPUT FRAME SET.
 	//
@@ -384,28 +427,28 @@ void Configuration<Spartan6>::createConfigurationPackage(
     Spartan6::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<Spartan6::Part>& part,
-    bool emit_crc);
+    const FullStreamOptions& options);
 
 template <>
 void Configuration<Series7>::createConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<Series7::Part>& part,
-    bool emit_crc);
+    const FullStreamOptions& options);
 
 template <>
 void Configuration<UltraScale>::createConfigurationPackage(
     UltraScale::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<UltraScale::Part>& part,
-    bool emit_crc);
+    const FullStreamOptions& options);
 
 template <>
 void Configuration<UltraScalePlus>::createConfigurationPackage(
     UltraScalePlus::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<UltraScalePlus::Part>& part,
-    bool emit_crc);
+    const FullStreamOptions& options);
 
 // Same reason as above: these four are defined in configuration.cc and must be
 // declared before use in every translation unit.

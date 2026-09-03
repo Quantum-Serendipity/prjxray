@@ -129,12 +129,14 @@ struct BitstreamPatcher {
 
 		// Put together a configuration package
 		typename ArchType::ConfigurationPackage configuration_package;
-		// false: xc7patch has always emitted a CRC-disabled stream and
-		// this change does not move it. --emit_crc is offered on
-		// xc7frames2bit, where the experiment that motivated it lives.
+		// Defaults: xc7patch has always emitted a CRC-disabled stream
+		// with COR1 at each architecture's own literal, and this change
+		// does not move it. --emit_crc and --rbcrc are offered on
+		// xc7frames2bit, where the experiments that motivated them
+		// live.
 		xilinx::Configuration<ArchType>::createConfigurationPackage(
 		    configuration_package, configuration_packet_data, part,
-		    false);
+		    xilinx::FullStreamOptions());
 
 		// Write bitstream.
 		auto bitstream_writer =

@@ -20,6 +20,7 @@
 #include <prjxray/xilinx/bitstream_reader.h>
 #include <prjxray/xilinx/bitstream_writer.h>
 #include <prjxray/xilinx/configuration.h>
+#include <prjxray/xilinx/xc7series/configuration_options_1_value.h>
 
 DEFINE_string(part_name, "", "Name of the 7-series part");
 DEFINE_string(part_file, "", "Definition file for target 7-series part");
@@ -119,6 +120,35 @@ DEFINE_bool(emit_crc,
             "turning it on changes the payload of every full bitstream this "
             "toolchain builds, and hundreds of recorded payload hashes "
             "identify artefacts by exactly that payload.");
+DEFINE_string(
+    rbcrc,
+    "off",
+    "FULL BITSTREAMS ONLY, Series7 only. COR1[8] RBCRC_EN plus COR1[16:15] "
+    "RBCRC_ACTION -- the device's own continuous background readback of "
+    "configuration memory (UG470 ch. 8), which is what detects a "
+    "single-event upset in a region that is running and never reloaded. "
+    "off (default): COR1 = 0x00000000 and no COR1 write moves, which is what "
+    "every full bitstream this writer has ever emitted carries and why the "
+    "feature has been unreachable from this flow. continue | halt | "
+    "correct_and_halt | correct_and_continue: RBCRC_EN set and RBCRC_ACTION "
+    "encoded per Table 5-33, whose encoding is 00/01/11/10 and is NOT in "
+    "menu order. Enabling it changes exactly one word of the emitted stream. "
+    "TWO THINGS IT DOES NOT DO. It is not an identity check: UG470 ch. 8 says "
+    "'the hardware golden CRC is automatically regenerated after any write to "
+    "FDRI', so the scrubber adopts whatever a partial reconfiguration leaves "
+    "and cannot tell an authorised load from corruption. And it needs a "
+    "clock: per Table 8-1 the engine runs off the ICAPE2 CLK, or STARTUPE2's "
+    "USRCCLKO, or an internal oscillator selected by POST_CRC_FREQ -- and a "
+    "JTAG-configured design instantiating neither primitive gets NO CLOCK, "
+    "so the bit is set and the scan never runs.");
+DEFINE_bool(rbcrc_error_pin,
+            true,
+            "COR1[9] RBCRC_NO_PIN, INVERTED to match the pin's behaviour "
+            "rather than the bit's name: true (the default, and the "
+            "register's default) leaves INIT_B driven Low on a readback-CRC "
+            "mismatch; false sets RBCRC_NO_PIN and frees the pin. Only "
+            "meaningful with --rbcrc, and passing it alone is a refusal, not "
+            "a no-op.");
 DEFINE_bool(verify,
             true,
             "Read the emitted bitstream back through the bitstream READER and "
@@ -151,6 +181,26 @@ namespace xilinx = prjxray::xilinx;
 namespace xc7series = prjxray::xilinx::xc7series;
 
 namespace {
+
+// --rbcrc's spelling -> COR1[16:15]. Returns false on an unknown name; "off"
+// is handled by the caller, because it is the absence of a COR1 override
+// rather than a value of one.
+bool ParseRbcrcAction(
+    const std::string& name,
+    xc7series::ConfigurationOptions1Value::ReadbackCrcAction* out) {
+	using Action = xc7series::ConfigurationOptions1Value::ReadbackCrcAction;
+	if (name == "continue")
+		*out = Action::Continue;
+	else if (name == "halt")
+		*out = Action::Halt;
+	else if (name == "correct_and_halt")
+		*out = Action::CorrectAndHalt;
+	else if (name == "correct_and_continue")
+		*out = Action::CorrectAndContinue;
+	else
+		return false;
+	return true;
+}
 
 // The pre-pass geometry, from wherever the caller's flags point. There is NO
 // fallback: a mask that cannot be built from the database is not built at all,
@@ -755,11 +805,36 @@ struct Frames2BitWriter {
 			// Put together a configuration package
 			typename ArchType::ConfigurationPackage
 			    configuration_package;
-			xilinx::Configuration<ArchType>::
-			    createConfigurationPackage(
-			        configuration_package,
-			        configuration_packet_data, part,
-			        FLAGS_emit_crc);
+			xilinx::FullStreamOptions full_options;
+			full_options.emit_crc = FLAGS_emit_crc;
+			if (FLAGS_rbcrc != "off") {
+				xc7series::ConfigurationOptions1Value::
+				    ReadbackCrcAction action;
+				if (!ParseRbcrcAction(FLAGS_rbcrc, &action)) {
+					std::cerr
+					    << "--rbcrc must be off, continue, "
+					       "halt, correct_and_halt or "
+					       "correct_and_continue."
+					    << std::endl;
+					return 1;
+				}
+				full_options.cor1 =
+				    xc7series::ConfigurationOptions1Value()
+				        .SetContinuousReadbackCrc(true)
+				        .SetReadbackCrcAction(action)
+				        .SetReadbackCrcErrorPinDisabled(
+				            !FLAGS_rbcrc_error_pin);
+			}
+			try {
+				xilinx::Configuration<ArchType>::
+				    createConfigurationPackage(
+				        configuration_package,
+				        configuration_packet_data, part,
+				        full_options);
+			} catch (const std::runtime_error& e) {
+				std::cerr << e.what() << std::endl;
+				return 1;
+			}
 
 			// Write bitstream
 			auto bitstream_writer =
@@ -814,6 +889,48 @@ int main(int argc, char* argv[]) {
 		          << ". The stream CRC model and the two write "
 		             "positions are both 7-series measurements; there "
 		             "is no degraded version to fall back to."
+		          << std::endl;
+		return 1;
+	}
+	// --rbcrc has the same two edges as --emit_crc and for the same reason:
+	// COR1 is written by the FULL path only -- the Series7 partial writer
+	// touches CMD, IDCODE, MASK, CTL0, FAR, FDRI and CRC and no other
+	// register -- and UG470 Table 5-33's layout is a 7-series layout.
+	//
+	// That the partial path leaves COR1 alone is the useful half: RBCRC_EN
+	// established by the static's full bitstream survives every partial
+	// load that follows, so this flag belongs on the static and nowhere
+	// else. Accepting it on a partial would silently produce a stream that
+	// enables nothing.
+	if (FLAGS_rbcrc != "off" && FLAGS_partial_bitstream) {
+		std::cerr << "--rbcrc is the FULL bitstream switch. COR1 is "
+		             "written only by the full path, and a partial "
+		             "bitstream does not clear it: set --rbcrc when "
+		             "building the STATIC, and every partial loaded "
+		             "over it keeps the setting."
+		          << std::endl;
+		return 1;
+	}
+	if (FLAGS_rbcrc != "off" && FLAGS_architecture != "Series7") {
+		std::cerr << "--rbcrc is characterised for Series7 only and "
+		             "--architecture is "
+		          << FLAGS_architecture
+		          << ". COR1's field layout is UG470 Table 5-33's; "
+		             "Spartan6 numbers the register differently and "
+		             "UltraScale/UltraScale+ follow UG570, which is "
+		             "uncharacterised here."
+		          << std::endl;
+		return 1;
+	}
+	// A flag that silently does nothing is a check that never runs.
+	// --rbcrc_error_pin only reaches the stream through the COR1 override
+	// --rbcrc builds, so passing it alone asks for a bit that is never
+	// written.
+	if (!FLAGS_rbcrc_error_pin && FLAGS_rbcrc == "off") {
+		std::cerr << "--norbcrc_error_pin sets COR1[9] RBCRC_NO_PIN, "
+		             "which is only written when --rbcrc is on. With "
+		             "--rbcrc off no COR1 override is emitted at all "
+		             "and the flag would do nothing."
 		          << std::endl;
 		return 1;
 	}

@@ -65,7 +65,21 @@ void Configuration<Spartan6>::createConfigurationPackage(
     Spartan6::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<Spartan6::Part>& part,
-    bool emit_crc) {
+    const FullStreamOptions& options) {
+	// COR1 IS THE ONE FULL-BITSTREAM REGISTER THIS WRITER OFFERS A KNOB ON,
+	// AND THE KNOB IS SERIES7-ONLY. Spartan6 numbers COR1 0x0a,
+	// not 0x0e, and UG380 gives it an unrelated layout with no
+	// readback-CRC field at all.
+	if (options.cor1) {
+		throw std::runtime_error(
+		    "FullStreamOptions::cor1 is characterised for Series7 "
+		    "only. Spartan6's COR1 is register 0x0a with a UG380 "
+		    "layout that has no readback-CRC field. "
+		    "There is no degraded version to fall back to: a 7-series "
+		    "COR1 field pattern written into this register would be a "
+		    "guess that emits at exit 0.");
+	}
+
 	using ArchType = Spartan6;
 	using ConfigurationRegister = ArchType::ConfRegType;
 	// Initialization sequence
@@ -580,7 +594,7 @@ void Configuration<Series7>::createConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<Series7::Part>& part,
-    bool emit_crc) {
+    const FullStreamOptions& options) {
 	using ArchType = Series7;
 	using ConfigurationRegister = ArchType::ConfRegType;
 
@@ -601,7 +615,8 @@ void Configuration<Series7>::createConfigurationPackage(
 	// (docs/partial-bitstream.md section 11). 0x30000001,<crc> becomes
 	// 0x30008001,0x00000007 and nothing else in the stream moves.
 	//
-	// So emit_crc does not add a code path; it declines to disable one.
+	// So options.emit_crc does not add a code path; it declines to disable
+	// one.
 	//
 	// computeStreamCrc() is called on out_packets AS IT STANDS, which is
 	// why this is a lambda and not a precomputed pair of values: the CRC
@@ -609,8 +624,8 @@ void Configuration<Series7>::createConfigurationPackage(
 	// last reset, and a write to CRC is itself a reset, so CRC #2 covers
 	// only what follows CRC #1. Reading the accumulator at the moment of
 	// emission is the only formulation that cannot get that wrong.
-	auto crc_or_rcrc = [&out_packets, emit_crc]() {
-		if (emit_crc) {
+	auto crc_or_rcrc = [&out_packets, &options]() {
+		if (options.emit_crc) {
 			out_packets.emplace_back(
 			    new ConfigurationPacketWithPayload<
 			        1, ConfigurationRegister>(
@@ -679,10 +694,21 @@ void Configuration<Series7>::createConfigurationPackage(
 	             xc7series::ConfigurationOptions0Value::SignalReleaseCycle::
 	                 Phase6)}));
 
+	// Configuration Options 1. 0x00000000 unless the caller asked for
+	// something else: that is every documented COR1 field at its documented
+	// default (UG470 Table 5-32), and it is the word in all 20 Vivado
+	// full-bitstream packet dumps in the xc7-dpr corpus.
+	//
+	// THE FIELD THIS EXISTS FOR IS BIT 8, RBCRC_EN. With it clear -- which
+	// is what every full bitstream this writer has ever emitted carries --
+	// the device's continuous background readback of configuration memory
+	// never starts, so nothing on the die is watching for an upset between
+	// loads. It is unreachable from a hardcoded constant, which is the
+	// whole reason FullStreamOptions::cor1 exists.
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::COR1, {0x0}));
+	        ConfigurationRegister::COR1, {options.cor1.value_or(0x0)}));
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
@@ -807,7 +833,21 @@ void Configuration<UltraScale>::createConfigurationPackage(
     UltraScale::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<UltraScale::Part>& part,
-    bool emit_crc) {
+    const FullStreamOptions& options) {
+	// COR1 IS THE ONE FULL-BITSTREAM REGISTER THIS WRITER OFFERS A KNOB ON,
+	// AND THE KNOB IS SERIES7-ONLY. UltraScale's COR1 default here is
+	// 0x00400000 and its layout is UG570's, which this project has never
+	// measured.
+	if (options.cor1) {
+		throw std::runtime_error(
+		    "FullStreamOptions::cor1 is characterised for Series7 "
+		    "only. UltraScale's COR1 layout is UG570's and is "
+		    "uncharacterised here. "
+		    "There is no degraded version to fall back to: a 7-series "
+		    "COR1 field pattern written into this register would be a "
+		    "guess that emits at exit 0.");
+	}
+
 	using ArchType = UltraScale;
 	using ConfigurationRegister = ArchType::ConfRegType;
 	// Initialization sequence
@@ -980,7 +1020,21 @@ void Configuration<UltraScalePlus>::createConfigurationPackage(
     UltraScalePlus::ConfigurationPackage& out_packets,
     const PacketData& packet_data,
     absl::optional<UltraScalePlus::Part>& part,
-    bool emit_crc) {
+    const FullStreamOptions& options) {
+	// COR1 IS THE ONE FULL-BITSTREAM REGISTER THIS WRITER OFFERS A KNOB ON,
+	// AND THE KNOB IS SERIES7-ONLY. UltraScale+'s COR1 default here is
+	// 0x00400000 and its layout is UG570's, which this project has never
+	// measured.
+	if (options.cor1) {
+		throw std::runtime_error(
+		    "FullStreamOptions::cor1 is characterised for Series7 "
+		    "only. UltraScale+'s COR1 layout is UG570's and is "
+		    "uncharacterised here. "
+		    "There is no degraded version to fall back to: a 7-series "
+		    "COR1 field pattern written into this register would be a "
+		    "guess that emits at exit 0.");
+	}
+
 	using ArchType = UltraScalePlus;
 	using ConfigurationRegister = ArchType::ConfRegType;
 	// Initialization sequence
