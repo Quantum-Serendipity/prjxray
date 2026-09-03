@@ -362,12 +362,32 @@ void AddFrame(Frames<Series7>::Frames2Data* frames,
 	                std::vector<uint32_t>(101, fill));
 }
 
+// A stand-in for the LOCKED STATIC's frames over the whole test part, which is
+// what --static_frames carries and what every flush frame is taken from. The
+// fill is deliberately NOT zero: an all-zero static would make "the writer
+// emitted the static's content" and "the writer emitted zeros" the same bytes,
+// and the second is the payload that erases live logic if the device ever
+// commits a flush frame.
+Frames<Series7>::Frames2Data StaticOverTestPart(uint32_t fill = 0x5A5A5A5Au) {
+	Frames<Series7>::Frames2Data out;
+	auto part = MakeTestPart();
+	absl::optional<xc7series::FrameAddress> a(
+	    xc7series::FrameAddress(Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0,
+	                                 0)));
+	while (a) {
+		AddFrame(&out, static_cast<uint32_t>(*a), fill);
+		a = part.GetNextFrameAddress(*a);
+	}
+	return out;
+}
+
 }  // namespace
 
 // Derive-from-input: the emitted frame set is the input frame set, and a gap
 // in the input becomes a new FAR block rather than a run of zero frames.
 TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	// Two frames at the end of CLB row 0 col 0, then a GAP over col 1
 	// minors 0-1, then col 1 minors 2-3.
@@ -381,25 +401,38 @@ TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xEE);
 
 	auto blocks = Configuration<Series7>::createPartialPacketData(
-	    frames, part, /*pad_frames=*/0);
+	    frames, statics, part, /*pad_frames=*/0);
 
 	// Three runs: [clb r0 c0 m2..3], [clb r0 c1 m2..3], [bram r0 c0 m0..3].
+	//
+	// TWO OF THE THREE CARRY A FLUSH FRAME, and which two is decided by
+	// where each block stops, not by how long it is. The device commits
+	// N-1 of an FDRI burst's N frames, so a block whose last frame is not
+	// at a row-group end needs one frame past it:
+	//   blocks[0]  clb r0 c0 m2..3 -> next is clb r0 c1 m0, SAME row
+	//              group, no dummy position to fall into  -> FLUSH
+	//   blocks[1]  clb r0 c1 m2..3 -> next is clb ROW 1, a row-group end,
+	//              where the counter's two dummy positions are and where
+	//              --pad_frames applies  -> NO flush
+	//   blocks[2]  bram r0 c0 m0..3 -> next is bram r0 c1 m0, same row
+	//              group  -> FLUSH
 	ASSERT_EQ(blocks.size(), 3u);
 	EXPECT_EQ(blocks[0].first,
 	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 2));
-	EXPECT_EQ(blocks[0].second.size(), 2u * 101);
+	EXPECT_EQ(blocks[0].second.size(), 3u * 101);
 	EXPECT_EQ(blocks[1].first,
 	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 2));
 	EXPECT_EQ(blocks[1].second.size(), 2u * 101);
 	EXPECT_EQ(blocks[2].first,
 	          Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, 0));
-	EXPECT_EQ(blocks[2].second.size(), 4u * 101);
+	EXPECT_EQ(blocks[2].second.size(), 5u * 101);
 
-	// Total words == total input frames. Nothing was invented.
+	// Total words == the input's frames plus the TWO flush frames. Nothing
+	// else was invented.
 	size_t words = 0;
 	for (auto& b : blocks)
 		words += b.second.size();
-	EXPECT_EQ(words, frames.size() * 101);
+	EXPECT_EQ(words, (frames.size() + 2) * 101);
 
 	// And the payloads are the caller's, in order.
 	EXPECT_EQ(blocks[0].second.front(), 0xAAu);
@@ -408,7 +441,7 @@ TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 
 	// The frame-set check agrees, walking forward from each FAR.
 	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
-	                                                       part, 0),
+	                                                       statics, part, 0),
 	          frames.size());
 }
 
@@ -416,6 +449,7 @@ TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 // pad frames there and a block spanning one would need padding in the middle.
 TEST(ConfigurationTest, PartialPacketDataSplitsAtRowBoundary) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
@@ -425,14 +459,14 @@ TEST(ConfigurationTest, PartialPacketDataSplitsAtRowBoundary) {
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 1, 0, m), 0x22);
 
 	auto blocks = Configuration<Series7>::createPartialPacketData(
-	    frames, part, /*pad_frames=*/0);
+	    frames, statics, part, /*pad_frames=*/0);
 	ASSERT_EQ(blocks.size(), 2u);
 	EXPECT_EQ(blocks[0].first,
 	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 0));
 	EXPECT_EQ(blocks[1].first,
 	          Addr(xc7series::BlockType::CLB_IO_CLK, 1, 0, 0));
 	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
-	                                                       part, 0),
+	                                                       statics, part, 0),
 	          8u);
 }
 
@@ -442,18 +476,26 @@ TEST(ConfigurationTest, PartialPacketDataSplitsAtRowBoundary) {
 // because there a pad would land on a live static frame.
 TEST(ConfigurationTest, PartialPacketDataPadsOnlyAtRowEnds) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 
 	// Block ending MID-ROW: col 0 minors 0-2 of a 4-frame column.
 	Frames<Series7>::Frames2Data midrow;
 	for (int m = 0; m < 3; ++m)
 		AddFrame(&midrow,
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x33);
-	auto a = Configuration<Series7>::createPartialPacketData(midrow, part, 0);
-	auto b = Configuration<Series7>::createPartialPacketData(midrow, part, 2);
+	auto a = Configuration<Series7>::createPartialPacketData(midrow, statics,
+	                                                        part, 0);
+	auto b = Configuration<Series7>::createPartialPacketData(midrow, statics,
+	                                                        part, 2);
 	ASSERT_EQ(a.size(), 1u);
 	ASSERT_EQ(b.size(), 1u);
-	EXPECT_EQ(a[0].second.size(), 3u * 101);
-	EXPECT_EQ(b[0].second.size(), 3u * 101);  // no pad: mid-row
+	// 3 real + 1 FLUSH, and --pad_frames does not move it: pads are the
+	// row-end object and this block does not reach a row end. The flush
+	// frame is not a pad and carries the static, not zeros.
+	EXPECT_EQ(a[0].second.size(), 4u * 101);
+	EXPECT_EQ(b[0].second.size(), 4u * 101);
+	for (size_t i = 3 * 101; i < a[0].second.size(); ++i)
+		EXPECT_EQ(a[0].second[i], 0x5A5A5A5Au);
 
 	// Block ending at a ROW END: all of CLB row 0, cols 0 and 1.
 	Frames<Series7>::Frames2Data rowend;
@@ -463,9 +505,9 @@ TEST(ConfigurationTest, PartialPacketDataPadsOnlyAtRowEnds) {
 			         Addr(xc7series::BlockType::CLB_IO_CLK, 0, col,
 			              m),
 			         0x44);
-	auto none = Configuration<Series7>::createPartialPacketData(rowend, part,
-	                                                            0);
-	auto padded = Configuration<Series7>::createPartialPacketData(rowend,
+	auto none = Configuration<Series7>::createPartialPacketData(rowend, statics,
+	                                                            part, 0);
+	auto padded = Configuration<Series7>::createPartialPacketData(rowend, statics,
 	                                                              part, 2);
 	ASSERT_EQ(none.size(), 1u);
 	ASSERT_EQ(padded.size(), 1u);
@@ -477,13 +519,13 @@ TEST(ConfigurationTest, PartialPacketDataPadsOnlyAtRowEnds) {
 	// Either way the frame SET is the input's, and the check knows which
 	// padding it was built with.
 	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(none, rowend,
-	                                                       part, 0),
+	                                                       statics, part, 0),
 	          8u);
 	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(padded, rowend,
-	                                                       part, 2),
+	                                                       statics, part, 2),
 	          8u);
 	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(padded, rowend,
-	                                                          part, 0),
+	                                                          statics, part, 0),
 	             std::runtime_error);
 }
 
@@ -492,38 +534,148 @@ TEST(ConfigurationTest, PartialPacketDataPadsOnlyAtRowEnds) {
 // outside the input.
 TEST(ConfigurationTest, PartialFrameSetCheckRejectsALeak) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 2; ++m)
 		AddFrame(&frames,
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x44);
 
-	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames, statics,
 	                                                              part, 0);
 	ASSERT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
-	                                                       part, 0),
+	                                                       statics, part, 0),
 	          2u);
-	// Grow the block by one frame without telling the caller -- exactly
-	// what the zero-fill design did, 2,032 times over.
-	blocks[0].second.resize(3 * 101, 0);
+	// The block is 2 real frames + 1 flush frame, so a LEAK is now a FOURTH
+	// frame. Grow it by one without telling the caller -- exactly what the
+	// zero-fill design did, 2,032 times over.
+	blocks[0].second.resize(4 * 101, 0);
 	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
-	                                                          part, 0),
+	                                                          statics, part, 0),
 	             std::runtime_error);
 	// ...and a block that drops a frame is rejected too.
 	blocks[0].second.resize(1 * 101, 0);
 	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
-	                                                          part, 0),
+	                                                          statics, part, 0),
 	             std::runtime_error);
+}
+
+// THE FLUSH FRAME. The device commits N-1 of the N frames shifted into an FDRI
+// burst and discards the pending one at the next FAR write -- measured by ICAP
+// at N = 2, 3 and 4 on two independent instruments
+// (docs/icap-rung4-fdri-and-the-flush-frame.md sections 8, 10 and 12) -- so a
+// block ending mid-row-group must carry one frame past its last, or that last
+// frame never reaches configuration memory. Measured on silicon 2026-09-03: a
+// 72-frame ROI-T partial loaded twice and the readback found 71 committed both
+// times, with 0x000010A3 still holding the resident static.
+//
+// FOUR ASSERTIONS, and the last two are the ones that make the first two mean
+// something: the frame is at the right address, it carries the STATIC and not
+// zeros, it is NOT counted as a written frame, and a checker fed a block
+// without it -- which is every partial this tree emitted before 2026-09-03 --
+// REFUSES.
+TEST(ConfigurationTest, PartialPacketDataFlushesAMidRowBlock) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 3; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x77);
+
+	auto blocks = Configuration<Series7>::createPartialPacketData(
+	    frames, statics, part, 0);
+	ASSERT_EQ(blocks.size(), 1u);
+	ASSERT_EQ(blocks[0].second.size(), 4u * 101);
+
+	// 1. the address. The flush frame occupies the slot the device's
+	//    frame-address counter reaches after the block's last real frame.
+	const uint32_t flush_at =
+	    Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 3);
+	EXPECT_EQ(static_cast<uint32_t>(
+	              *part->GetNextFrameAddress(xc7series::FrameAddress(
+	                  Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 2)))),
+	          flush_at);
+	// 2. the content is the STATIC's at that address, all 101 words.
+	const auto& want = statics.at(xc7series::FrameAddress(flush_at));
+	for (size_t w = 0; w < 101; ++w)
+		EXPECT_EQ(blocks[0].second[3 * 101 + w], want[w]) << "word " << w;
+
+	// 3. it is not a written frame. checkPartialFrameSet returns the count
+	//    --expected_frames is compared against, and a flush frame that
+	//    counted would make every ROI's declared frame count wrong by the
+	//    number of its FAR blocks.
+	std::set<uint32_t> flush;
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(
+	              blocks, frames, statics, part, 0, &flush),
+	          3u);
+	EXPECT_EQ(flush, std::set<uint32_t>({flush_at}));
+
+	// 4. RED. A block that stops on its own last frame is the pre-2026-09-03
+	//    stream, and the checker must refuse it rather than counting 3.
+	auto unterminated = blocks;
+	unterminated[0].second.resize(3 * 101);
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(
+	                 unterminated, frames, statics, part, 0),
+	             std::runtime_error);
+
+	// ...and an all-zero flush frame is refused too, which is the whole
+	// reason the content is checked at all: byteman's flush frame is zeros,
+	// and zeros at a live static address erase it if the device ever
+	// commits them.
+	auto zeroed = blocks;
+	for (size_t w = 0; w < 101; ++w)
+		zeroed[0].second[3 * 101 + w] = 0;
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(
+	                 zeroed, frames, statics, part, 0),
+	             std::runtime_error);
+
+	// ...and the WRITER refuses when the static has no frame at the flush
+	// address, rather than substituting zeros itself.
+	Frames<Series7>::Frames2Data no_flush_source;
+	for (int m = 0; m < 3; ++m)
+		AddFrame(&no_flush_source,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x11);
+	EXPECT_THROW(Configuration<Series7>::createPartialPacketData(
+	                 frames, no_flush_source, part, 0),
+	             std::runtime_error);
+}
+
+// A block that ends AT a row-group end is flushed by its first PAD, so it must
+// NOT also get a flush frame -- that would be a third frame past a block Vivado
+// terminates with two. The pad path is unchanged and this is what says so.
+TEST(ConfigurationTest, PartialPacketDataDoesNotFlushARowEndBlock) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
+	Frames<Series7>::Frames2Data rowend;
+	for (int col = 0; col < 2; ++col)
+		for (int m = 0; m < 4; ++m)
+			AddFrame(&rowend,
+			         Addr(xc7series::BlockType::CLB_IO_CLK, 0, col,
+			              m),
+			         0x88);
+	auto padded = Configuration<Series7>::createPartialPacketData(
+	    rowend, statics, part, 2);
+	ASSERT_EQ(padded.size(), 1u);
+	// 8 real + 2 pads, NOT 8 + 2 + 1.
+	EXPECT_EQ(padded[0].second.size(), 10u * 101);
+	for (size_t i = 8 * 101; i < padded[0].second.size(); ++i)
+		EXPECT_EQ(padded[0].second[i], 0u);
+	std::set<uint32_t> flush;
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(
+	              padded, rowend, statics, part, 2, &flush),
+	          8u);
+	EXPECT_TRUE(flush.empty());
 }
 
 // An address the part does not have is an error, not a silent walk off the end
 // of the device. This is one of the four inputs that used to spin at 100% CPU.
 TEST(ConfigurationTest, PartialPacketDataRejectsInvalidAddress) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0), 0x55);
 	AddFrame(&frames, Addr(xc7series::BlockType::CLB_IO_CLK, 7, 9, 0), 0x66);
 	EXPECT_THROW(
-	    Configuration<Series7>::createPartialPacketData(frames, part, 0),
+	    Configuration<Series7>::createPartialPacketData(frames, statics, part, 0),
 	    std::runtime_error);
 }
 
@@ -532,6 +684,7 @@ TEST(ConfigurationTest, PartialPacketDataRejectsInvalidAddress) {
 // CLB block before the BRAM one.
 TEST(ConfigurationTest, CreatePartialConfigurationPackage) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
@@ -543,7 +696,7 @@ TEST(ConfigurationTest, CreatePartialConfigurationPackage) {
 	// NOTE: cfg_packets must outlive partial_configuration_package. The
 	// FDRI packets hold non-owning spans over it.
 	auto cfg_packets = Configuration<Series7>::createPartialPacketData(
-	    frames, part, 0);
+	    frames, statics, part, 0);
 	Series7::ConfigurationPackage partial_configuration_package;
 	Configuration<Series7>::createPartialConfigurationPackage(
 	    partial_configuration_package, cfg_packets, part,
@@ -568,7 +721,9 @@ TEST(ConfigurationTest, CreatePartialConfigurationPackage) {
 		if (cfg->address() == Series7::ConfRegType::FDRI)
 			fdri_words += cfg->data().size();
 	}
-	EXPECT_EQ(fdri_words, frames.size() * 101);
+	// Two blocks, each ending mid-row-group, so each carries one flush
+	// frame past the input's last.
+	EXPECT_EQ(fdri_words, (frames.size() + 2) * 101);
 }
 
 // ---------------------------------------------------------------------------
@@ -986,6 +1141,7 @@ TEST(ConfigurationTest, PrePassRefusesOnOtherArchitectures) {
 // PR #1492 emitted it once for the whole stream.
 TEST(ConfigurationTest, PartialPackageEmitsWcfgPerFarBlock) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
@@ -993,7 +1149,7 @@ TEST(ConfigurationTest, PartialPackageEmitsWcfgPerFarBlock) {
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
 		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xBC);
-	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames, statics,
 	                                                              part, 0);
 	ASSERT_EQ(blocks.size(), 2u);
 	Series7::ConfigurationPackage pkg;
@@ -1016,6 +1172,7 @@ TEST(ConfigurationTest, PartialPackageEmitsWcfgPerFarBlock) {
 // to be asserted structurally.
 TEST(ConfigurationTest, PartialPackageInterleavesTheTwoPasses) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
@@ -1028,9 +1185,9 @@ TEST(ConfigurationTest, PartialPackageInterleavesTheTwoPasses) {
 	    frames, no_static, false, TestGeometry(), nullptr);
 
 	auto pass2_blocks =
-	    Configuration<Series7>::createPartialPacketData(frames, part, 0);
+	    Configuration<Series7>::createPartialPacketData(frames, statics, part, 0);
 	auto pass1_blocks = Configuration<Series7>::createPartialPacketData(
-	    pass1_frames, part, 0);
+	    pass1_frames, statics, part, 0);
 	auto all = pass1_blocks;
 	all.insert(all.end(), pass2_blocks.begin(), pass2_blocks.end());
 
@@ -1067,11 +1224,12 @@ TEST(ConfigurationTest, PartialPackageInterleavesTheTwoPasses) {
 // Unit 6.2 step 4. A .bit over JTAG carries IDCODE; a raw ICAP stream does not.
 TEST(ConfigurationTest, PartialPackageOmitsIdcodeInRawMode) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
-	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames, statics,
 	                                                              part, 0);
 	auto count_idcode = [](const Series7::ConfigurationPackage& pkg) {
 		size_t n = 0;
@@ -1106,11 +1264,12 @@ TEST(ConfigurationTest, PartialPackageOmitsIdcodeInRawMode) {
 // Type-1 CMD write of RCRC -- and changes nothing else.
 TEST(ConfigurationTest, PartialPackageCrcDisableIsATwoWordSubstitution) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
-	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames, statics,
 	                                                              part, 0);
 
 	Series7::ConfigurationPackage with_crc, without_crc;
@@ -1198,11 +1357,12 @@ TEST(ConfigurationTest, StreamCrcMatchesAnIndependentImplementation) {
 // prior corpus said they were "typically omitted".
 TEST(ConfigurationTest, PartialPackageEmitsTheMaskCtl0Triple) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
-	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames, statics,
 	                                                              part, 0);
 	Series7::ConfigurationPackage pkg;
 	Configuration<Series7>::createPartialConfigurationPackage(
@@ -1255,11 +1415,12 @@ TEST(ConfigurationTest, PartialPackageEmitsTheMaskCtl0Triple) {
 // The trailing NOP count. 16 in every golden partial; PR #1492 emitted 400.
 TEST(ConfigurationTest, PartialPackageEndsWithSixteenNops) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
 	for (int m = 0; m < 4; ++m)
 		AddFrame(&frames,
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
-	auto blocks = Configuration<Series7>::createPartialPacketData(frames,
+	auto blocks = Configuration<Series7>::createPartialPacketData(frames, statics,
 	                                                              part, 0);
 	Series7::ConfigurationPackage pkg;
 	Configuration<Series7>::createPartialConfigurationPackage(

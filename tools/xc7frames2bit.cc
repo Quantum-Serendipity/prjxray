@@ -7,8 +7,10 @@
  *
  * SPDX-License-Identifier: ISC
  */
+#include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -40,16 +42,21 @@ DEFINE_bool(partial_bitstream,
             "a union rather than a filter.");
 DEFINE_uint32(pad_frames,
               0,
-              "Zero frames appended to a FAR block of a partial bitstream that "
-              "ends at a row or block-type boundary -- the one place the "
-              "device's frame-address counter has dummy positions, so the pads "
-              "land nowhere. A block that stops mid-row never gets them, "
-              "because there a pad would land on a live static frame. Vivado "
-              "follows the same rule: in the measured golden its CLB block "
-              "ends mid-row and carries no pad, and its BRAM block ends at a "
-              "row end and carries exactly two. 0 is the default because it is "
-              "the value for which no frame outside the input can be written "
-              "under any input; 2 reproduces Vivado's stream.");
+              "ROW-END PAD SLOTS: zero frames appended to a FAR block of a "
+              "partial bitstream that ends at a row or block-type boundary -- "
+              "the one place the device's frame-address counter has dummy "
+              "positions, so they land nowhere. A block that stops mid-row "
+              "never gets them, because there a pad would land on a live "
+              "static frame; it gets one FLUSH FRAME instead, which is a "
+              "different object, is not optional, and this flag does not "
+              "govern it. Vivado's measured golden: its BRAM block ends at a "
+              "row end and carries two pad slots, and its CLB block ends "
+              "mid-row and carries one flush frame at 0x00001C00, column 56, "
+              "OUTSIDE the pblock -- an earlier version of this text read that "
+              "frame as region content and concluded 'no pad', which is how a "
+              "stream that never commits its own last frame passed every "
+              "check this tool had. 2 reproduces Vivado's pad slots; 0 is the "
+              "default and leaves a row-end block flushed by nothing.");
 DEFINE_uint32(expected_frames,
               0,
               "If non-zero, fail unless the partial bitstream writes exactly "
@@ -60,12 +67,20 @@ DEFINE_string(
     static_frames,
     "",
     "A .frm carrying the LOCKED STATIC DESIGN's own content over the region's "
-    "frames. Required by the FAR double-write pre-pass and NOT recoverable "
-    "from --frm_file: that file is already STATIC | RM, which is pass 2, and "
-    "the union has destroyed each bit's provenance. A DFX flow holds this by "
-    "construction -- it is the same object it merged to build pass 2. Produce "
-    "it with `bitread -o` + bitread-to-frm from the locked static's bitstream, "
-    "or with fasm2frames --roi-strict over the static's FASM.");
+    "frames, PLUS ONE FRAME PAST THE LAST FRAME OF EACH FAR BLOCK. Two "
+    "consumers. (1) The FAR double-write pre-pass, which needs the static term "
+    "over the region and cannot recover it from --frm_file: that file is "
+    "already STATIC | RM, which is pass 2, and the union has destroyed each "
+    "bit's provenance. (2) The FLUSH FRAME of any block that ends mid-row -- "
+    "the device commits N-1 of an FDRI burst's N frames, so such a block needs "
+    "one frame past its last, and that frame is written at a real address "
+    "OUTSIDE the region. Its content is the static's own configuration there, "
+    "which is safe whether or not the device commits it; there is no zero "
+    "fallback, because a zero frame that did commit would erase live static "
+    "logic. A DFX flow holds both by construction. Produce it with `bitread "
+    "-o` + bitread-to-frm from the locked static's bitstream, or with "
+    "fasm2frames --roi-strict over the static's FASM plus the trailing "
+    "address(es) taken from the static's FULL frame set.");
 DEFINE_string(
     prepass,
     "auto",
@@ -240,10 +255,22 @@ void ReportPrePass(const xilinx::PrePassReport& rep) {
 // the pass that matters and is blind to the pre-pass by construction; the
 // pre-pass is checked structurally at build time instead, because a frame-level
 // comparator is definitionally blind to it.
+//
+// `flush` names the frames the stream writes PAST the end of a FAR block that
+// stops mid-row, and `flush_source` says what each must contain. They are
+// outside --frm_file by construction, so "the caller did not ask for this
+// address" -- the right verdict for every other extra -- is the wrong one here.
+// They are not waived either: an extra address must be a declared flush
+// address AND carry the static's exact words, so this is a second reading of
+// the flush frame through the decoder rather than a hole in the verifier.
 template <typename ArchType>
-int VerifyRoundTrip(const std::string& path,
-                    const typename ArchType::Part& part,
-                    const typename xilinx::Frames<ArchType>::Frames2Data& want) {
+int VerifyRoundTrip(
+    const std::string& path,
+    const typename ArchType::Part& part,
+    const typename xilinx::Frames<ArchType>::Frames2Data& want,
+    const std::set<uint32_t>& flush = std::set<uint32_t>(),
+    const typename xilinx::Frames<ArchType>::Frames2Data& flush_source =
+        typename xilinx::Frames<ArchType>::Frames2Data()) {
 	std::ifstream in(path, std::ios::binary);
 	if (!in) {
 		std::cerr << "--verify: cannot reopen " << path << std::endl;
@@ -295,15 +322,53 @@ int VerifyRoundTrip(const std::string& path,
 			}
 		}
 	}
+	size_t flush_seen = 0, flush_wrong = 0;
+	uint32_t first_flush_wrong = 0;
 	for (const auto& frame : got) {
-		if (want.find(frame.first) == want.end()) {
+		if (want.find(frame.first) != want.end())
+			continue;
+		const uint32_t a = static_cast<uint32_t>(frame.first);
+		if (!flush.count(a)) {
 			if (!extra++)
-				first_extra = static_cast<uint32_t>(frame.first);
+				first_extra = a;
+			continue;
 		}
+		++flush_seen;
+		auto src = flush_source.find(frame.first);
+		if (src == flush_source.end() ||
+		    src->second.size() != frame.second.size() ||
+		    !std::equal(src->second.begin(), src->second.end(),
+		                frame.second.begin())) {
+			if (!flush_wrong++)
+				first_flush_wrong = a;
+		}
+	}
+	if (flush_seen != flush.size()) {
+		std::cerr << "xc7frames2bit: --verify FAILED. The stream "
+		             "declares "
+		          << flush.size() << " flush frame(s) and the decoder "
+		                             "reads back "
+		          << flush_seen
+		          << ". A block that stops mid-row and writes no frame "
+		             "past its last never commits that last frame."
+		          << std::endl;
+		return 1;
+	}
+	if (flush_wrong) {
+		std::cerr << "xc7frames2bit: --verify FAILED. " << flush_wrong
+		          << " flush frame(s) do not carry the static's own "
+		             "content, first 0x"
+		          << std::hex << std::setw(8) << std::setfill('0')
+		          << first_flush_wrong << std::dec << "." << std::endl;
+		return 1;
 	}
 	if (!missing && !wrong && !extra) {
 		std::cerr << "xc7frames2bit: --verify round-trip OK, "
-		          << want.size() << " frames, ECC included" << std::endl;
+		          << want.size() << " frames, ECC included";
+		if (!flush.empty())
+			std::cerr << ", plus " << flush.size()
+			          << " flush frame(s) carrying the static";
+		std::cerr << std::endl;
 		return 0;
 	}
 	std::cerr << "xc7frames2bit: --verify FAILED. " << want.size()
@@ -380,6 +445,16 @@ struct Frames2BitWriter {
 			// packets hold non-owning spans over them.
 			typename xilinx::Frames<ArchType>::Frames2Data
 			    prepass_frames;
+			// The static's frames, read ONCE and used twice: as the
+			// pre-pass's STATIC term, and as the source of every
+			// block's flush frame. Declared here rather than inside
+			// the pre-pass branch because a mid-row block needs the
+			// flush frame under --prepass off too.
+			xilinx::Frames<ArchType> static_frames;
+			// Filled by checkPartialFrameSet; read by --verify,
+			// which would otherwise convict the flush frames as
+			// addresses the caller never asked for.
+			std::set<uint32_t> flush_addresses;
 			typename xilinx::Configuration<ArchType>::
 			    PartialPacketData all_blocks;
 			typename ArchType::ConfigurationPackage
@@ -439,10 +514,23 @@ struct Frames2BitWriter {
 					    "file: there would be nothing to "
 					    "configure.");
 
+				// READ BEFORE THE FIRST EMISSION, because the
+				// flush frame's content comes from here and
+				// the writer refuses rather than zero-filling.
+				if (have_static &&
+				    static_frames.readFrames(
+				        FLAGS_static_frames)) {
+					throw std::runtime_error(
+					    "Static frames file " +
+					    FLAGS_static_frames +
+					    " not found or invalid");
+				}
+
 				cfg_packets = xilinx::Configuration<ArchType>::
-				    createPartialPacketData(frames.getFrames(),
-				                            part,
-				                            FLAGS_pad_frames);
+				    createPartialPacketData(
+				        frames.getFrames(),
+				        static_frames.getFrames(), part,
+				        FLAGS_pad_frames);
 
 				// Unconditional, per Unit 6.3 step 5: the
 				// check runs on every emission rather than
@@ -451,7 +539,8 @@ struct Frames2BitWriter {
 				    xilinx::Configuration<ArchType>::
 				        checkPartialFrameSet(
 				            cfg_packets, frames.getFrames(),
-				            part, FLAGS_pad_frames);
+				            static_frames.getFrames(), part,
+				            FLAGS_pad_frames, &flush_addresses);
 
 				if (FLAGS_expected_frames &&
 				    emitted != FLAGS_expected_frames) {
@@ -469,15 +558,6 @@ struct Frames2BitWriter {
 				}
 
 				if (want_prepass) {
-					xilinx::Frames<ArchType> static_frames;
-					if (use_static &&
-					    static_frames.readFrames(
-					        FLAGS_static_frames)) {
-						throw std::runtime_error(
-						    "Static frames file " +
-						    FLAGS_static_frames +
-						    " not found or invalid");
-					}
 					if (!use_static) {
 						std::cerr
 						    << "xc7frames2bit: WARNING: "
@@ -529,8 +609,9 @@ struct Frames2BitWriter {
 					auto prepass_blocks =
 					    xilinx::Configuration<ArchType>::
 					        createPartialPacketData(
-					            prepass_frames, part,
-					            FLAGS_pad_frames);
+					            prepass_frames,
+					            static_frames.getFrames(),
+					            part, FLAGS_pad_frames);
 					// Both passes must land on exactly the
 					// same frames. Checking pass 1's frame
 					// set separately is what stops a
@@ -540,8 +621,9 @@ struct Frames2BitWriter {
 					    xilinx::Configuration<ArchType>::
 					        checkPartialFrameSet(
 					            prepass_blocks,
-					            prepass_frames, part,
-					            FLAGS_pad_frames);
+					            prepass_frames,
+					            static_frames.getFrames(),
+					            part, FLAGS_pad_frames);
 					if (emitted1 != emitted ||
 					    prepass_blocks.size() !=
 					        cfg_packets.size())
@@ -594,6 +676,17 @@ struct Frames2BitWriter {
 						    << std::endl;
 				}
 
+				// The trailing-frame accounting is PRINTED, not
+				// left to be inferred from the byte count. A
+				// stream whose blocks stop on their last real
+				// frame is the defect measured on silicon
+				// 2026-09-03 (71 of 72 committed), and it is
+				// invisible in every other number on this line.
+				size_t stream_frames = 0;
+				for (const auto& b : cfg_packets)
+					stream_frames +=
+					    b.second.size() /
+					    ArchType::words_per_frame;
 				std::cerr << "xc7frames2bit: partial "
 				             "bitstream, "
 				          << emitted << " frames in "
@@ -602,7 +695,13 @@ struct Frames2BitWriter {
 				          << (want_prepass ? 2 : 1)
 				          << " pass(es), "
 				          << all_blocks.size()
-				          << " FDRI block(s) emitted"
+				          << " FDRI block(s) emitted; "
+				          << (stream_frames - emitted)
+				          << " trailing frame(s) per pass, of "
+				             "which "
+				          << flush_addresses.size()
+				          << " flush frame(s) carrying the "
+				             "static"
 				          << std::endl;
 
 				// If the partial bitstream feature is not
@@ -632,8 +731,9 @@ struct Frames2BitWriter {
 			}
 
 			if (FLAGS_verify &&
-			    VerifyRoundTrip<ArchType>(FLAGS_output_file, *part,
-			                              frames.getFrames()))
+			    VerifyRoundTrip<ArchType>(
+			        FLAGS_output_file, *part, frames.getFrames(),
+			        flush_addresses, static_frames.getFrames()))
 				return 1;
 		} else {
 			if (std::is_same<ArchType, xilinx::Series7>::value ||
