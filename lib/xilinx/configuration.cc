@@ -9,6 +9,7 @@
  */
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
@@ -70,6 +71,15 @@ void Configuration<Spartan6>::createConfigurationPackage(
 	// AND THE KNOB IS SERIES7-ONLY. Spartan6 numbers COR1 0x0a,
 	// not 0x0e, and UG380 gives it an unrelated layout with no
 	// readback-CRC field at all.
+	if (options.compressed) {
+		throw std::runtime_error(
+		    "FullStreamOptions::compressed is the multiple-frame-write "
+		    "encoding, and its grammar was read out of Vivado's own "
+		    "7-series compressed bitstreams. No other architecture here "
+		    "has been measured, and an MFWR sequence guessed from this "
+		    "one would emit at exit 0.");
+	}
+
 	if (options.cor1) {
 		throw std::runtime_error(
 		    "FullStreamOptions::cor1 is characterised for Series7 "
@@ -589,6 +599,233 @@ void Configuration<Series7>::createPartialConfigurationPackage(
 		nop();
 }
 
+namespace {
+
+bool Series7SameFrameGroup(const xc7series::FrameAddress& a,
+                           const xc7series::FrameAddress& b) {
+	return a.block_type() == b.block_type() &&
+	       a.is_bottom_half_rows() == b.is_bottom_half_rows() &&
+	       a.row() == b.row();
+}
+
+bool Series7FrameIsZero(const std::vector<uint32_t>& words) {
+	for (uint32_t w : words) {
+		if (w)
+			return false;
+	}
+	return true;
+}
+
+}  // namespace
+
+template <>
+CompressedFrameData Configuration<Series7>::createCompressedFrameData(
+    const Frames<Series7>::Frames2Data& frames,
+    absl::optional<Series7::Part>& part) {
+	using ArchType = Series7;
+	const size_t kWordsPerFrame = ArchType::words_per_frame;
+
+	std::vector<std::pair<ArchType::FrameAddress, const std::vector<uint32_t>*>>
+	    seq;
+	auto walk = absl::optional<ArchType::FrameAddress>(
+	    ArchType::FrameAddress(0));
+	while (walk) {
+		auto it = frames.find(*walk);
+		if (it == frames.end()) {
+			std::ostringstream err;
+			err << "Compressed full bitstream: the frame set is "
+			       "missing address 0x"
+			    << std::hex << static_cast<uint32_t>(*walk)
+			    << std::dec
+			    << ". Call Frames::addMissingFrames() first: the "
+			       "encoding walks the whole device and cannot "
+			       "leave a hole.";
+			throw std::runtime_error(err.str());
+		}
+		if (it->second.size() != kWordsPerFrame)
+			throw std::runtime_error(
+			    "Compressed full bitstream: a frame is not "
+			    "words_per_frame words long.");
+		seq.emplace_back(*walk, &it->second);
+		walk = part->GetNextFrameAddress(*walk);
+	}
+	if (seq.size() != frames.size()) {
+		std::ostringstream err;
+		err << "Compressed full bitstream: the frame set carries "
+		    << frames.size() << " address(es) and the part walks "
+		    << seq.size()
+		    << ". An address the part does not have cannot be written.";
+		throw std::runtime_error(err.str());
+	}
+
+	CompressedFrameData blocks;
+	const size_t n = seq.size();
+	size_t i = 0;
+	while (i < n) {
+		size_t j = i;
+		while (j < n &&
+		       Series7SameFrameGroup(seq[i].first, seq[j].first) &&
+		       !Series7FrameIsZero(*seq[j].second))
+			++j;
+		size_t k = j;
+		while (k < n &&
+		       Series7SameFrameGroup(seq[i].first, seq[k].first) &&
+		       Series7FrameIsZero(*seq[k].second))
+			++k;
+
+		CompressedFrameBlock block;
+		block.far = static_cast<uint32_t>(seq[i].first);
+		if (k > j) {
+			for (size_t m = i; m <= j; ++m)
+				block.words.insert(block.words.end(),
+				                   seq[m].second->begin(),
+				                   seq[m].second->end());
+			block.mfw = true;
+			for (size_t m = j + 1; m < k; ++m)
+				block.replay.push_back(
+				    static_cast<uint32_t>(seq[m].first));
+		} else {
+			for (size_t m = i; m < j; ++m)
+				block.words.insert(block.words.end(),
+				                   seq[m].second->begin(),
+				                   seq[m].second->end());
+			block.words.insert(block.words.end(),
+			                   2 * kWordsPerFrame, 0);
+			block.mfw = false;
+		}
+		blocks.push_back(std::move(block));
+		i = k;
+	}
+	return blocks;
+}
+
+template <>
+size_t Configuration<Series7>::checkCompressedFrameSet(
+    const CompressedFrameData& blocks,
+    const Frames<Series7>::Frames2Data& frames,
+    absl::optional<Series7::Part>& part) {
+	using ArchType = Series7;
+	const size_t kWordsPerFrame = ArchType::words_per_frame;
+
+	std::map<uint32_t, std::vector<uint32_t>> written;
+	auto commit = [&written](uint32_t address,
+	                         const std::vector<uint32_t>& words) {
+		if (!written.emplace(address, words).second) {
+			std::ostringstream err;
+			err << "Compressed full bitstream: address 0x"
+			    << std::hex << address << std::dec
+			    << " is written twice.";
+			throw std::runtime_error(err.str());
+		}
+	};
+
+	for (const auto& block : blocks) {
+		if (block.words.empty() ||
+		    block.words.size() % kWordsPerFrame != 0)
+			throw std::runtime_error(
+			    "Compressed full bitstream: an FDRI burst is not a "
+			    "whole, non-zero number of frames.");
+		const size_t burst_frames = block.words.size() / kWordsPerFrame;
+		ArchType::FrameAddress cursor(block.far);
+		if (frames.find(cursor) == frames.end()) {
+			std::ostringstream err;
+			err << "Compressed full bitstream: block FAR 0x"
+			    << std::hex << block.far << std::dec
+			    << " is not a frame address of this part.";
+			throw std::runtime_error(err.str());
+		}
+		if (!block.mfw && !block.replay.empty())
+			throw std::runtime_error(
+			    "Compressed full bitstream: a block with no MFW "
+			    "episode carries replay addresses, which nothing "
+			    "would emit.");
+
+		const size_t auto_incremented =
+		    block.mfw ? burst_frames - 1 : burst_frames - 2;
+		if (!block.mfw && burst_frames < 3)
+			throw std::runtime_error(
+			    "Compressed full bitstream: a row-end block needs "
+			    "at least one real frame and two pad slots.");
+
+		for (size_t f = 0; f < auto_incremented; ++f) {
+			commit(static_cast<uint32_t>(cursor),
+			       std::vector<uint32_t>(
+			           block.words.begin() + f * kWordsPerFrame,
+			           block.words.begin() +
+			               (f + 1) * kWordsPerFrame));
+			auto next = part->GetNextFrameAddress(cursor);
+			const bool last = (f + 1 == auto_incremented);
+			const bool in_group =
+			    next && Series7SameFrameGroup(cursor, *next);
+			if (block.mfw || !last) {
+				if (!in_group) {
+					std::ostringstream err;
+					err << "Compressed full bitstream: an "
+					       "FDRI burst crosses a row or "
+					       "block-type boundary at 0x"
+					    << std::hex
+					    << static_cast<uint32_t>(cursor)
+					    << std::dec
+					    << ". The frame-address counter has "
+					       "two dummy positions there and "
+					       "the burst's remaining frames "
+					       "would land on the wrong "
+					       "addresses.";
+					throw std::runtime_error(err.str());
+				}
+				cursor = *next;
+			} else if (in_group) {
+				std::ostringstream err;
+				err << "Compressed full bitstream: a row-end "
+				       "block's two pad slots would land on "
+				       "real frame address 0x"
+				    << std::hex
+				    << static_cast<uint32_t>(*next) << std::dec
+				    << " rather than in the counter's dummy "
+				       "positions.";
+				throw std::runtime_error(err.str());
+			}
+		}
+
+		if (block.mfw) {
+			const std::vector<uint32_t> seed(
+			    block.words.end() - kWordsPerFrame,
+			    block.words.end());
+			commit(static_cast<uint32_t>(cursor), seed);
+			for (uint32_t address : block.replay)
+				commit(address, seed);
+		}
+	}
+
+	if (written.size() != frames.size()) {
+		std::ostringstream err;
+		err << "Compressed full bitstream: the blocks commit "
+		    << written.size() << " frame(s) and the input carries "
+		    << frames.size() << ".";
+		throw std::runtime_error(err.str());
+	}
+	for (const auto& frame : frames) {
+		auto it = written.find(static_cast<uint32_t>(frame.first));
+		if (it == written.end()) {
+			std::ostringstream err;
+			err << "Compressed full bitstream: address 0x"
+			    << std::hex << static_cast<uint32_t>(frame.first)
+			    << std::dec << " is never written.";
+			throw std::runtime_error(err.str());
+		}
+		if (it->second != frame.second) {
+			std::ostringstream err;
+			err << "Compressed full bitstream: address 0x"
+			    << std::hex << static_cast<uint32_t>(frame.first)
+			    << std::dec
+			    << " is written with words the input does not "
+			       "carry.";
+			throw std::runtime_error(err.str());
+		}
+	}
+	return written.size();
+}
+
 template <>
 void Configuration<Series7>::createConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
@@ -743,24 +980,71 @@ void Configuration<Series7>::createConfigurationPackage(
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
 	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::FAR, {0x0}));
-	out_packets.emplace_back(
-	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
-	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::CMD,
-	        {static_cast<uint32_t>(xc7series::Command::WCFG)}));
-	out_packets.emplace_back(new NopPacket<ConfigurationRegister>());
+	auto far_write = [&out_packets](uint32_t address) {
+		out_packets.emplace_back(
+		    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
+		        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
+		        ConfigurationRegister::FAR, {address}));
+	};
+	auto cmd_write = [&out_packets](xc7series::Command command) {
+		out_packets.emplace_back(
+		    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
+		        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
+		        ConfigurationRegister::CMD,
+		        {static_cast<uint32_t>(command)}));
+	};
+	auto fdri_burst = [&out_packets](const PacketData& words) {
+		out_packets.emplace_back(
+		    new ConfigurationPacket<ConfigurationRegister>(
+		        TYPE1,
+		        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
+		        ConfigurationRegister::FDRI, {}));
+		out_packets.emplace_back(
+		    new ConfigurationPacket<ConfigurationRegister>(
+		        TYPE2,
+		        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
+		        ConfigurationRegister::FDRI, words));
+	};
 
-	// Frame data write
-	out_packets.emplace_back(new ConfigurationPacket<ConfigurationRegister>(
-	    TYPE1, ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	    ConfigurationRegister::FDRI, {}));
-	out_packets.emplace_back(new ConfigurationPacket<ConfigurationRegister>(
-	    TYPE2, ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	    ConfigurationRegister::FDRI, packet_data));
+	if (options.compressed) {
+		for (const CompressedFrameBlock& block : *options.compressed) {
+			far_write(block.far);
+			cmd_write(xc7series::Command::WCFG);
+			out_packets.emplace_back(
+			    new NopPacket<ConfigurationRegister>());
+			fdri_burst(block.words);
+			if (!block.mfw)
+				continue;
+			cmd_write(xc7series::Command::MFW);
+			for (int ii = 0; ii < 12; ++ii)
+				out_packets.emplace_back(
+				    new NopPacket<ConfigurationRegister>());
+			out_packets.emplace_back(
+			    new ConfigurationPacketWithPayload<
+			        8, ConfigurationRegister>(
+			        ConfigurationPacket<ConfigurationRegister>::
+			            Opcode::Write,
+			        ConfigurationRegister::MFWR,
+			        {0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}));
+			for (uint32_t address : block.replay) {
+				far_write(address);
+				out_packets.emplace_back(
+				    new ConfigurationPacketWithPayload<
+				        4, ConfigurationRegister>(
+				        ConfigurationPacket<
+				            ConfigurationRegister>::Opcode::
+				            Write,
+				        ConfigurationRegister::MFWR,
+				        {0x0, 0x0, 0x0, 0x0}));
+			}
+		}
+	} else {
+		far_write(0x0);
+		cmd_write(xc7series::Command::WCFG);
+		out_packets.emplace_back(
+		    new NopPacket<ConfigurationRegister>());
+		fdri_burst(packet_data);
+	}
 
 	// Finalization sequence.
 	// CRC #1 -- immediately after the frame data, before CMD:GRESTORE.
@@ -838,6 +1122,15 @@ void Configuration<UltraScale>::createConfigurationPackage(
 	// AND THE KNOB IS SERIES7-ONLY. UltraScale's COR1 default here is
 	// 0x00400000 and its layout is UG570's, which this project has never
 	// measured.
+	if (options.compressed) {
+		throw std::runtime_error(
+		    "FullStreamOptions::compressed is the multiple-frame-write "
+		    "encoding, and its grammar was read out of Vivado's own "
+		    "7-series compressed bitstreams. No other architecture here "
+		    "has been measured, and an MFWR sequence guessed from this "
+		    "one would emit at exit 0.");
+	}
+
 	if (options.cor1) {
 		throw std::runtime_error(
 		    "FullStreamOptions::cor1 is characterised for Series7 "
@@ -1025,6 +1318,15 @@ void Configuration<UltraScalePlus>::createConfigurationPackage(
 	// AND THE KNOB IS SERIES7-ONLY. UltraScale+'s COR1 default here is
 	// 0x00400000 and its layout is UG570's, which this project has never
 	// measured.
+	if (options.compressed) {
+		throw std::runtime_error(
+		    "FullStreamOptions::compressed is the multiple-frame-write "
+		    "encoding, and its grammar was read out of Vivado's own "
+		    "7-series compressed bitstreams. No other architecture here "
+		    "has been measured, and an MFWR sequence guessed from this "
+		    "one would emit at exit 0.");
+	}
+
 	if (options.cor1) {
 		throw std::runtime_error(
 		    "FullStreamOptions::cor1 is characterised for Series7 "

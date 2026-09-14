@@ -84,6 +84,15 @@ struct PartialStreamOptions {
 	unsigned int trailing_nops = 16;
 };
 
+struct CompressedFrameBlock {
+	uint32_t far = 0;
+	std::vector<uint32_t> words;
+	std::vector<uint32_t> replay;
+	bool mfw = false;
+};
+
+using CompressedFrameData = std::vector<CompressedFrameBlock>;
+
 // Knobs on the emitted FULL-bitstream packet stream. Every default reproduces,
 // byte for byte, the stream this writer emitted before the struct existed:
 // `emit_crc` was already a parameter and its default is unchanged, and an
@@ -118,6 +127,8 @@ struct FullStreamOptions {
 	// these bits: whatever the full bitstream established persists across
 	// every partial load that follows it.
 	absl::optional<uint32_t> cor1;
+
+	const CompressedFrameData* compressed = nullptr;
 };
 
 template <typename ArchType>
@@ -385,6 +396,20 @@ class Configuration {
 	    const typename Frames<ArchType>::Frames2Data& frames,
 	    absl::optional<typename ArchType::Part>& part);
 
+	// Throws std::runtime_error unless `frames` is exactly the part's frame
+	// set; call Frames::addMissingFrames first.
+	static CompressedFrameData createCompressedFrameData(
+	    const typename Frames<ArchType>::Frames2Data& frames,
+	    absl::optional<typename ArchType::Part>& part);
+
+	// Throws std::runtime_error unless the frames the blocks commit, walked
+	// forward from each block's FAR through GetNextFrameAddress, are exactly
+	// `frames`. Returns the count committed.
+	static size_t checkCompressedFrameSet(
+	    const CompressedFrameData& blocks,
+	    const typename Frames<ArchType>::Frames2Data& frames,
+	    absl::optional<typename ArchType::Part>& part);
+
 	Configuration(const typename ArchType::Part& part,
 	              std::map<typename ArchType::FrameAddress,
 	                       std::vector<uint32_t>>* frames)
@@ -495,6 +520,38 @@ Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
 template <>
 uint32_t Configuration<Series7>::computeStreamCrc(
     const Series7::ConfigurationPackage& packets);
+
+template <>
+CompressedFrameData Configuration<Series7>::createCompressedFrameData(
+    const Frames<Series7>::Frames2Data& frames,
+    absl::optional<Series7::Part>& part);
+
+template <>
+size_t Configuration<Series7>::checkCompressedFrameSet(
+    const CompressedFrameData& blocks,
+    const Frames<Series7>::Frames2Data& frames,
+    absl::optional<Series7::Part>& part);
+
+template <typename ArchType>
+CompressedFrameData Configuration<ArchType>::createCompressedFrameData(
+    const typename Frames<ArchType>::Frames2Data& frames,
+    absl::optional<typename ArchType::Part>& part) {
+	throw std::runtime_error(
+	    "The multiple-frame-write encoding is characterised for 7-series "
+	    "only. Its packet grammar was read out of Vivado's own compressed "
+	    "bitstreams for this family and no other architecture here has been "
+	    "measured.");
+}
+
+template <typename ArchType>
+size_t Configuration<ArchType>::checkCompressedFrameSet(
+    const CompressedFrameData& blocks,
+    const typename Frames<ArchType>::Frames2Data& frames,
+    absl::optional<typename ArchType::Part>& part) {
+	throw std::runtime_error(
+	    "The multiple-frame-write encoding is characterised for 7-series "
+	    "only.");
+}
 
 template <typename ArchType>
 typename Frames<ArchType>::Frames2Data
@@ -997,6 +1054,9 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 	bool start_new_write = false;
 	typename ArchType::FrameAddress current_frame_address = 0;
 
+	absl::Span<const uint32_t> frame_buffer;
+	bool mfwr_has_own_far = false;
+
 	Configuration<ArchType>::FrameMap frames;
 	for (auto packet : packets) {
 		if (packet.opcode() !=
@@ -1010,6 +1070,11 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 				if (packet.data().size() < 1)
 					continue;
 				mask_register = packet.data()[0];
+				break;
+			case ArchType::ConfRegType::MFWR:
+				if (!mfwr_has_own_far || frame_buffer.empty())
+					continue;
+				frames[frame_address_register] = frame_buffer;
 				break;
 			case ArchType::ConfRegType::CTL1:
 				if (packet.data().size() < 1)
@@ -1044,6 +1109,7 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 				if (packet.data().size() < 1)
 					continue;
 				frame_address_register = packet.data()[0];
+				mfwr_has_own_far = true;
 
 				// Per UG470, the command present in the CMD
 				// register is executed each time the FAR
@@ -1068,6 +1134,15 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 					current_frame_address =
 					    frame_address_register;
 					start_new_write = false;
+				}
+
+				if (packet.data().size() >=
+				    ArchType::words_per_frame) {
+					frame_buffer = packet.data().subspan(
+					    packet.data().size() -
+					        ArchType::words_per_frame,
+					    ArchType::words_per_frame);
+					mfwr_has_own_far = false;
 				}
 
 				// Number of words in configuration frames

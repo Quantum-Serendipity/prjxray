@@ -149,6 +149,25 @@ DEFINE_bool(rbcrc_error_pin,
             "mismatch; false sets RBCRC_NO_PIN and frees the pin. Only "
             "meaningful with --rbcrc, and passing it alone is a refusal, not "
             "a no-op.");
+DEFINE_bool(compress,
+            false,
+            "FULL BITSTREAMS ONLY, Series7 only. Encode the frame data with "
+            "the configuration engine's own MULTIPLE FRAME WRITE instead of "
+            "one type-2 FDRI burst over the whole device. A run of identical "
+            "frames is written once by FDRI and then replayed to each further "
+            "address by a FAR write plus a 4-word MFWR packet -- 7 words per "
+            "frame against 101 -- which is what Vivado's "
+            "BITSTREAM.GENERAL.COMPRESS emits and what this flow has never "
+            "had. The device decompresses it in the configuration engine, "
+            "before any fabric exists, so unlike a fabric decompressor it "
+            "applies to the STATIC bitstream that boots from flash. The "
+            "saving is a property of the design's frame density, not of the "
+            "flag: it comes from all-zero frames, which are most of a "
+            "7-series device. --verify covers it end to end -- the emitted "
+            "stream is read back through the bitstream READER, whose MFWR "
+            "case expands the replays, and every frame must match the input "
+            "word for word. NOT VALIDATED ON SILICON: offline expansion "
+            "equality is not proof the engine accepts the stream.");
 DEFINE_bool(verify,
             true,
             "Read the emitted bitstream back through the bitstream READER and "
@@ -807,6 +826,44 @@ struct Frames2BitWriter {
 			    configuration_package;
 			xilinx::FullStreamOptions full_options;
 			full_options.emit_crc = FLAGS_emit_crc;
+			xilinx::CompressedFrameData compressed;
+			if (FLAGS_compress) {
+				try {
+					compressed = xilinx::Configuration<
+					    ArchType>::
+					    createCompressedFrameData(
+					        frames.getFrames(), part);
+					size_t committed =
+					    xilinx::Configuration<ArchType>::
+					        checkCompressedFrameSet(
+					            compressed,
+					            frames.getFrames(), part);
+					size_t burst_frames = 0, replays = 0,
+					       episodes = 0;
+					for (const auto& b : compressed) {
+						burst_frames +=
+						    b.words.size() /
+						    ArchType::words_per_frame;
+						replays += b.replay.size();
+						if (b.mfw)
+							++episodes;
+					}
+					std::cerr
+					    << "xc7frames2bit: multiple-frame "
+					       "write, "
+					    << committed << " frame(s) in "
+					    << compressed.size()
+					    << " FDRI burst(s) carrying "
+					    << burst_frames << " frame(s), "
+					    << episodes << " MFW episode(s), "
+					    << replays << " replay(s)"
+					    << std::endl;
+				} catch (const std::runtime_error& err) {
+					std::cerr << err.what() << std::endl;
+					return 1;
+				}
+				full_options.compressed = &compressed;
+			}
 			if (FLAGS_rbcrc != "off") {
 				xc7series::ConfigurationOptions1Value::
 				    ReadbackCrcAction action;
@@ -931,6 +988,27 @@ int main(int argc, char* argv[]) {
 		             "which is only written when --rbcrc is on. With "
 		             "--rbcrc off no COR1 override is emitted at all "
 		             "and the flag would do nothing."
+		          << std::endl;
+		return 1;
+	}
+	if (FLAGS_compress && FLAGS_partial_bitstream) {
+		std::cerr << "--compress is the FULL bitstream switch. The "
+		             "partial path emits one FAR block per run of "
+		             "consecutive frames and has no MFW episode; a "
+		             "partial's frames are also the dense ones, which "
+		             "is the population this encoding cannot shrink."
+		          << std::endl;
+		return 1;
+	}
+	if (FLAGS_compress && FLAGS_architecture != "Series7") {
+		std::cerr << "--compress is characterised for Series7 only and "
+		             "--architecture is "
+		          << FLAGS_architecture
+		          << ". The MFWR packet grammar -- eight zero words for "
+		             "the write that carries no FAR, four for each "
+		             "replay -- was read out of Vivado's compressed "
+		             "7-series bitstreams; there is no degraded "
+		             "version to fall back to."
 		          << std::endl;
 		return 1;
 	}
