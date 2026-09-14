@@ -1007,9 +1007,16 @@ void Configuration<Series7>::createConfigurationPackage(
 	};
 
 	if (options.compressed) {
+		bool first_block = true;
 		for (const CompressedFrameBlock& block : *options.compressed) {
-			far_write(block.far);
-			cmd_write(xc7series::Command::WCFG);
+			if (first_block) {
+				far_write(block.far);
+				cmd_write(xc7series::Command::WCFG);
+			} else {
+				cmd_write(xc7series::Command::WCFG);
+				far_write(block.far);
+			}
+			first_block = false;
 			out_packets.emplace_back(
 			    new NopPacket<ConfigurationRegister>());
 			fdri_burst(block.words);
