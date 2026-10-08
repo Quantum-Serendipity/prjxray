@@ -289,7 +289,7 @@ def parse_db_line(line):
     if re.match(r'^origin:', orig_bits):
         origin = parts[1][7:]
         bits = frozenset(parts[2:])
-        orig_bits = line.replace(tag + " " + origin + " ", "")
+        orig_bits = line.replace(tag + " " + parts[1] + " ", "")
     else:
         origin = None
         bits = frozenset(parts[1:])
