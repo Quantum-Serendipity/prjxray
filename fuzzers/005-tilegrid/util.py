@@ -139,7 +139,7 @@ def add_tile_bits(
                 done = False
         else:
             assert block["offset"] == offset, "%s; orig offset %s, new %s" % (
--            tile_name, block["offset"], offset)
+                tile_name, block["offset"], offset)
 
         assert block["words"] == words
         if done: return
