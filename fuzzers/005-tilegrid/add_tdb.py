@@ -47,7 +47,17 @@ def load_db(fn):
         parts = l.split(' ')
         tagstr = parts[0]
         addrlist = parts[1:]
-        assert not any(s == '<const0>' for s in addrlist), (fn, l)
+        # segmatch emits a "<...>" marker (e.g. "<const0>", "<const1>",
+        # "<0 candidates>") instead of a frame address when it could not solve a
+        # tag's bit, i.e. the tile was not exercised/uniquely toggled by the
+        # design (e.g. unplaceable edge/special tiles such as BRAM_L_X114Y0 or
+        # CFG_CENTER_MID_X157Y84 on xc7vx485t-ffg1761). Such tiles can't have a
+        # base address solved here, so skip them with a warning rather than
+        # aborting the whole tilegrid aggregation.
+        if not addrlist or any(s.startswith('<') for s in addrlist):
+            print("WARNING: skipping unsolved tile (no address): "
+                  "%s in %s" % (l, fn))
+            continue
         check_frames(tagstr, addrlist)
         # Take the first address in the list
         frame, wordidx, bitidx = parse_addr(addrlist[0])
@@ -79,7 +89,8 @@ def load_db(fn):
         if not bitidx_up:
             bitidx = 0
         assert bitidx == 0, l
-        assert frame % 0x80 == 0, "Unaligned frame at 0x%08X" % frame
+        assert frame % 0x80 == 0, \
+            "Unaligned frame at 0x%08X in %s: %s" % (frame, fn, l)
         yield (tile, frame, wordidx)
 
 

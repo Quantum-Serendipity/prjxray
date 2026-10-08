@@ -9,6 +9,7 @@
 #
 # SPDX-License-Identifier: ISC
 import os.path
+import threading
 import pathlib
 import simplejson as json
 from prjxray import grid
@@ -51,6 +52,11 @@ class Database(object):
 
         # tilegrid.json JSON object
         self.tilegrid = None
+        # the Grid built from it, on first use.  The lock is only taken on
+        # the way to building it: after that the read of self._grid is the
+        # whole of grid(), which fasm2frames calls once per FASM line.
+        self._grid = None
+        self._grid_lock = threading.Lock()
         self.tileconn = None
         self.tile_types_json = None
         self.node_wires = None
@@ -133,8 +139,10 @@ class Database(object):
     def _read_tilegrid(self):
         """ Read tilegrid database if not already read. """
         if not self.tilegrid:
-            with open(os.path.join(self.db_root, self.fabric,
-                                   'tilegrid.json')) as f:
+            _tg = os.path.join(self.db_root, self.fabric, 'tilegrid.json')
+            if not os.path.exists(_tg):
+                _tg = os.path.join(self.db_root, 'tilegrid.json')
+            with open(_tg) as f:
                 self.tilegrid = json.load(f)
 
     def _read_tileconn(self):
@@ -152,9 +160,21 @@ class Database(object):
                 self.node_wires = json.load(f)
 
     def grid(self):
-        """ Return Grid object for database. """
-        self._read_tilegrid()
-        return grid.Grid(self, self.tilegrid)
+        """ Return Grid object for database.
+
+        Built once per Database: the Grid is read-only once constructed, and
+        constructing it takes about a second and a half for a large part.
+        fasm2frames asks for it inside a loop over tiles, so a fresh one per
+        call was two thirds of a bitstream's assembly time.
+        """
+        built = self._grid
+        if built is None:
+            with self._grid_lock:
+                if self._grid is None:
+                    self._read_tilegrid()
+                    self._grid = grid.Grid(self, self.tilegrid)
+                built = self._grid
+        return built
 
     def _read_tile_types(self):
         if self.tile_types_json is None:

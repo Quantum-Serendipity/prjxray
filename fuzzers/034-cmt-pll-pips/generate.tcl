@@ -7,28 +7,10 @@
 # SPDX-License-Identifier: ISC
 source "$::env(XRAY_DIR)/utils/utils.tcl"
 
-proc write_pip_txtdata {filename} {
-    puts "FUZ([pwd]): Writing $filename."
-    set fp [open $filename w]
-    set nets [get_nets -hierarchical]
-    set nnets [llength $nets]
-    set neti 0
-    foreach net $nets {
-        incr neti
-        if {($neti % 100) == 0 } {
-            puts "FUZ([pwd]): Dumping pips from net $net ($neti / $nnets)"
-        }
-        foreach pip [get_pips -of_objects $net] {
-            set tile [get_tiles -of_objects $pip]
-            set src_wire [get_wires -uphill -of_objects $pip]
-            set dst_wire [get_wires -downhill -of_objects $pip]
-            set num_pips [llength [get_nodes -uphill -of_objects [get_nodes -of_objects $dst_wire]]]
-            set dir_prop [get_property IS_DIRECTIONAL $pip]
-            puts $fp "$tile $pip $src_wire $dst_wire $num_pips $dir_prop"
-        }
-    }
-    close $fp
-}
+# Local write_pip_txtdata override removed — utils.tcl (sourced above)
+# has been patched with a bulk-fetch version that is ~4x faster on
+# xc7vx485tffg1761-2. Keeping this shadow would re-introduce hours of
+# per-net Tcl overhead.
 
 proc write_used_wires {filename} {
     puts "FUZ([pwd]): Writing $filename."

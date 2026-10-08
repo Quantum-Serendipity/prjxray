@@ -7,28 +7,14 @@
 # SPDX-License-Identifier: ISC
 source "$::env(XRAY_DIR)/utils/utils.tcl"
 
-proc write_pip_txtdata {filename} {
-    puts "FUZ([pwd]): Writing $filename."
-    set fp [open $filename w]
-    set nets [get_nets -hierarchical]
-    set nnets [llength $nets]
-    set neti 0
-    foreach net $nets {
-        incr neti
-        if {($neti % 100) == 0 } {
-            puts "FUZ([pwd]): Dumping pips from net $net ($neti / $nnets)"
-        }
-        foreach pip [get_pips -of_objects $net] {
-            set tile [get_tiles -of_objects $pip]
-            set src_wire [get_wires -uphill -of_objects $pip]
-            set dst_wire [get_wires -downhill -of_objects $pip]
-            set num_pips [llength [get_nodes -uphill -of_objects [get_nodes -of_objects $dst_wire]]]
-            set dir_prop [get_property IS_DIRECTIONAL $pip]
-            puts $fp "$tile $pip $src_wire $dst_wire $num_pips $dir_prop"
-        }
-    }
-    close $fp
-}
+# NOTE: this fuzzer previously defined its own slow Tcl write_pip_txtdata proc
+# that iterated foreach net foreach pip and queried the routing graph per-pip
+# (set num_pips [llength [get_nodes -uphill ...]] ...). On a large device like
+# xc7vx485t this took hours per specimen (1296 nets * O(nodes) Tcl queries).
+# Vivado's built-in `write_pip_txtdata $filename` produces the same 6-column
+# output (tile pip src_wire dst_wire pnum pdir) that the prjxray segmakers
+# parse, but in seconds. Drop the override; the call at the end of this file
+# now resolves to the built-in.
 
 proc make_manual_routes {filename} {
     puts "MANROUTE: Loading routes from $filename"

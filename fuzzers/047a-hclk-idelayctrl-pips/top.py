@@ -126,7 +126,8 @@ def main():
         (serdes_loc_x, serdes_loc_y) = grid.loc_of_tilename(tile)
         serdes_clk_reg = site_to_cmt[site]
         for tile_name in sorted(grid.tiles()):
-            if 'HCLK_IOI3' in tile_name:
+            # Accept HCLK_IOI3 (HR-bank kintex7) and HCLK_IOI (HP-bank virtex7).
+            if 'HCLK_IOI3' in tile_name or 'HCLK_IOI' in tile_name:
                 (hclk_tile_loc_x,
                  hclk_tile_loc_y) = grid.loc_of_tilename(tile_name)
                 if hclk_tile_loc_x == serdes_loc_x:

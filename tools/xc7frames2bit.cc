@@ -9,6 +9,7 @@
  */
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -809,6 +810,28 @@ struct Frames2BitWriter {
 			    std::is_same<ArchType, xilinx::UltraScale>::value ||
 			    std::is_same<ArchType,
 			                 xilinx::UltraScalePlus>::value) {
+				auto not_in_part =
+				    frames.findFramesNotInPart(part);
+				for (auto& address : not_in_part) {
+					std::cerr
+					    << "Frame address 0x" << std::hex
+					    << std::setw(8) << std::setfill('0')
+					    << static_cast<uint32_t>(address)
+					    << std::dec << " is not in part file "
+					    << FLAGS_part_file << std::endl;
+				}
+				if (!not_in_part.empty()) {
+					std::cerr
+					    << not_in_part.size()
+					    << " frame address(es) in "
+					    << FLAGS_frm_file
+					    << " are not in the part; is "
+					    << FLAGS_part_file
+					    << " the part the frames were made "
+					       "for?"
+					    << std::endl;
+					return 1;
+				}
 				// In case the frames input file is missing some
 				// frames that are in the tilegrid
 				frames.addMissingFrames(part);

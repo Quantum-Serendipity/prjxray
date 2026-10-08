@@ -45,3 +45,7 @@ set_property design_mode PinPlanning [current_fileset]
 open_io_design -name io_1
 
 print_tile_pips RIOI rioi.txt
+# virtex7 (and any HP-on-both-sides part) also has LIOI; the kintex7 reference
+# design only has RIOI so this line is harmless there (get_tiles returns
+# empty and an empty lioi.txt is written, which int_maketodo handles).
+print_tile_pips LIOI lioi.txt

@@ -113,3 +113,42 @@ TEST(FramesTest, ReadFramesComputesTheEccOnBlockTypeZeroOnly) {
 	EXPECT_EQ(frames.getFrames().at(xc7series::FrameAddress(bram))[0x32],
 	          0x0u);
 }
+
+TEST(FramesTest, FindFramesNotInPart) {
+	std::vector<xc7series::FrameAddress> test_part_addresses = {
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 0),
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 1),
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 2)};
+
+	xc7series::Part test_part(0x1234, test_part_addresses);
+
+	// Minor 3 is past the end of column 0, and the part has no row 1.
+	xc7series::FrameAddress past_column_end(
+	    xc7series::BlockType::CLB_IO_CLK, false, 0, 0, 3);
+	xc7series::FrameAddress missing_row(xc7series::BlockType::CLB_IO_CLK,
+	                                    false, 1, 0, 0);
+
+	Frames<Series7> frames;
+	frames.getFrames().emplace(std::make_pair(
+	    test_part_addresses[1], std::vector<uint32_t>(101, 0xCC)));
+	frames.getFrames().emplace(
+	    std::make_pair(past_column_end, std::vector<uint32_t>(101, 0xDD)));
+	frames.getFrames().emplace(
+	    std::make_pair(missing_row, std::vector<uint32_t>(101, 0xEE)));
+
+	auto not_in_part = frames.findFramesNotInPart(test_part);
+
+	ASSERT_EQ(not_in_part.size(), 2);
+	EXPECT_EQ(static_cast<uint32_t>(not_in_part[0]),
+	          static_cast<uint32_t>(past_column_end));
+	EXPECT_EQ(static_cast<uint32_t>(not_in_part[1]),
+	          static_cast<uint32_t>(missing_row));
+
+	// Frames that are all in the part give an empty list.
+	frames.getFrames().erase(past_column_end);
+	frames.getFrames().erase(missing_row);
+	EXPECT_TRUE(frames.findFramesNotInPart(test_part).empty());
+}

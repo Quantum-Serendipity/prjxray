@@ -10,10 +10,10 @@ create_project -force -part $::env(XRAY_PART) design design
 read_verilog top.v
 synth_design -top top
 
-set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_00) IOSTANDARD LVCMOS33" [get_ports clk]
-set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_01) IOSTANDARD LVCMOS33" [get_ports stb]
-set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_02) IOSTANDARD LVCMOS33" [get_ports di]
-set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_03) IOSTANDARD LVCMOS33" [get_ports do]
+set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_00) IOSTANDARD $::env(XRAY_IOSTANDARD)" [get_ports clk]
+set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_01) IOSTANDARD $::env(XRAY_IOSTANDARD)" [get_ports stb]
+set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_02) IOSTANDARD $::env(XRAY_IOSTANDARD)" [get_ports di]
+set_property -dict "PACKAGE_PIN $::env(XRAY_PIN_03) IOSTANDARD $::env(XRAY_IOSTANDARD)" [get_ports do]
 
 create_pblock roi
 
@@ -26,6 +26,9 @@ set_property BITSTREAM.GENERAL.PERFRAMECRC YES [current_design]
 
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets clk_IBUF]
 set_property IS_ENABLED 0 [get_drc_checks {DRC NDRV-1}]
+# BSCAN JTAG_CHAIN=3 -> BSCAN_X0Y0 mapping that Vivado 2020.1 rejects via
+# PDRC-2; same disable as 005-tilegrid/cfg/generate.tcl for the same reason.
+set_property IS_ENABLED 0 [get_drc_checks {PDRC-2}]
 # Disable MMCM frequency etc sanity checks
 #set_property IS_ENABLED 0 [get_drc_checks {PDRC-29}]
 #set_property IS_ENABLED 0 [get_drc_checks {PDRC-30}]

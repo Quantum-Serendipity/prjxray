@@ -616,8 +616,18 @@ def main():
                     continue
 
                 assert k in grid[tile], k
-                assert grid[tile][k] == grid2[tile][k], (
-                    tile, k, grid[tile][k], grid2[tile][k])
+                if k == 'sites':
+                    # tilegrid.json uses more specific site types than the dump
+                    # (e.g. IOB33->IOB33M/S, RAMB36E1->RAMBFIFO36E1)
+                    # Trust tilegrid.json for type names; assert structure matches
+                    for site_name in grid[tile][k]:
+                        if site_name in grid2[tile][k]:
+                            grid[tile][k][site_name] = grid2[tile][k][site_name]
+                    assert grid[tile][k] == grid2[tile][k], (
+                        tile, k, grid[tile][k], grid2[tile][k])
+                else:
+                    assert grid[tile][k] == grid2[tile][k], (
+                        tile, k, grid[tile][k], grid2[tile][k])
 
         with open(wire_map_file, 'wb') as f:
             pickle.dump(wire_map, f)

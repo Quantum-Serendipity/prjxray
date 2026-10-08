@@ -1,0 +1,8 @@
+set_property PACKAGE_PIN AE13 [get_ports clk]
+set_property PACKAGE_PIN AA13 [get_ports led]
+set_property IOSTANDARD LVCMOS33 [get_ports clk]
+set_property IOSTANDARD LVCMOS33 [get_ports led]
+set_property LOC BUFR_X0Y16 [get_cells bufr_i]
+set_property LOC BUFGCTRL_X0Y16 [get_cells bufg_i]
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -of_objects [get_pins bufr_i/I]]
+create_clock -period 10 [get_ports clk]

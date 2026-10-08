@@ -22,6 +22,10 @@ set_property IS_ENABLED 0 [get_drc_checks {REQP-84}]
 set_property IS_ENABLED 0 [get_drc_checks {REQP-85}]
 set_property IS_ENABLED 0 [get_drc_checks {REQP-87}]
 set_property IS_ENABLED 0 [get_drc_checks {REQP-85}]
+# ODELAY VAR_LOAD/VAR_LOAD_PIPE leaves CNTVALUEIN intentionally unconnected for
+# fuzzing; Vivado 2020.1 enforces this via REQP-135 (the IDELAY equivalents
+# REQP-79/81/.. are already disabled above, which is why the idelay fuzzer passes).
+set_property IS_ENABLED 0 [get_drc_checks {REQP-135}]
 set_property IS_ENABLED 0 [get_drc_checks {AVAL-28}]
 
 place_design

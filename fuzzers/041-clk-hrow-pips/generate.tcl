@@ -7,28 +7,10 @@
 # SPDX-License-Identifier: ISC
 source "$::env(XRAY_DIR)/utils/utils.tcl"
 
-proc write_pip_txtdata {filename} {
-    puts "FUZ([pwd]): Writing $filename."
-    set fp [open $filename w]
-    set nets [get_nets -hierarchical]
-    set nnets [llength $nets]
-    set neti 0
-    foreach net $nets {
-        incr neti
-        if {($neti % 100) == 0 } {
-            puts "FUZ([pwd]): Dumping pips from net $net ($neti / $nnets)"
-        }
-        foreach pip [get_pips -of_objects $net] {
-            set tile [get_tiles -of_objects $pip]
-            set src_wire [get_wires -uphill -of_objects $pip]
-            set dst_wire [get_wires -downhill -of_objects $pip]
-            set num_pips [llength [get_nodes -uphill -of_objects [get_nodes -of_objects $dst_wire]]]
-            set dir_prop [get_property IS_DIRECTIONAL $pip]
-            puts $fp "$tile $pip $src_wire $dst_wire $num_pips $dir_prop"
-        }
-    }
-    close $fp
-}
+# Local write_pip_txtdata override removed — the utils.tcl version sourced on
+# line 8 has been patched with bulk-fetch + dst-wire cache that's ~4x faster
+# on large devices like xc7vx485tffg1761-2. Keeping the duplicate here would
+# shadow that and re-introduce the slow per-net per-pip Tcl query path.
 
 proc load_todo {} {
     set fp [open "../../todo_all.txt" r]
@@ -61,7 +43,9 @@ proc route_todo {} {
 
         set is_gclk_net 0
         foreach wire $wires {
-            puts "Check wire $wire in $net"
+            # 'puts "Check wire $wire in $net"' removed — on xc7vx485tffg1761-2
+            # this loop runs ~100k times per specimen and the per-line stdout
+            # flush dominates wall time without producing useful information.
             if [string match "*CLK_HROW_CK_IN_*" $wire] {
                 set gclk_tile [lindex [split $wire /] 0]
                 set gclk_wire [lindex [split $wire /] 1]
@@ -75,10 +59,10 @@ proc route_todo {} {
             continue
         }
 
-        puts "Net $net wires:"
-        foreach wire [get_wires -of_objects $net] {
-            puts " - $wire"
-        }
+        # The "Net $net wires:" / " - $wire" debug dump that used to live here
+        # iterated every wire of every interesting net and was pure stdout
+        # noise; on xc7vx485tffg1761-2 that's another 5-10k puts per spec
+        # with no information used downstream. Removed.
 
         foreach wire $wires {
             set tile [lindex [split $wire /] 0]

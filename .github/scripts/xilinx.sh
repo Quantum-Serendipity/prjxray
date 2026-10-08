@@ -32,7 +32,7 @@ echo "----------------------------------------"
 (
 	set -e
 	cd /opt
-	if [ x"$XRAY_SETTINGS" = x"kintex7" ]; then
+	if [ x"$XRAY_SETTINGS" = x"kintex7" ] || [ x"$XRAY_SETTINGS" = x"virtex7" ]; then
 		echo "Using Xilinx Vivado Design Edition for $XRAY_SETTINGS build."
 		echo
 		ln -s /mnt/aux/Xilinx-design /opt/Xilinx

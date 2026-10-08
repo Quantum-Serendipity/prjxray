@@ -49,12 +49,15 @@ def gen_sites():
 
         sites, _ = zip(*sorted(zip(sites, sites_y), key=lambda x: x[1]))
 
+        # IOI/IDELAY-to-INT column spacing is 3 on Kintex-7 but 2 on Virtex-7
+        # (verified from the tilegrid for all LIOI/RIOI variants).
+        int_dx = 2 if os.environ.get('XRAY_DATABASE') == 'virtex7' else 3
         if gridinfo.tile_type[0] == 'L':
-            int_grid_x = loc.grid_x + 3
+            int_grid_x = loc.grid_x + int_dx
             pad_grid_x = loc.grid_x - 1
             int_tile_type = 'INT_L'
         else:
-            int_grid_x = loc.grid_x - 3
+            int_grid_x = loc.grid_x - int_dx
             pad_grid_x = loc.grid_x + 1
             int_tile_type = 'INT_R'
 

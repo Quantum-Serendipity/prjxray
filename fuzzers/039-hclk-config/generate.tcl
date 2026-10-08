@@ -17,6 +17,11 @@ proc run {} {
     place_design
     route_design
 
+    set fp [open bufio_sites.txt w]
+    foreach c [get_cells -quiet -hierarchical -filter {REF_NAME == BUFIO}] {
+        puts $fp "[get_property NAME $c] [get_sites -quiet -of_objects $c]"
+    }
+    close $fp
     write_checkpoint -force design.dcp
     write_bitstream -force design.bit
 }

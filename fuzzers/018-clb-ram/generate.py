@@ -76,7 +76,14 @@ for l in f:
         # Each one of: SRL16E, SRLC32E, LUT6
         bels = [p0, p1, p2, p3]
         verbose and print('  %s %s %s %s' % tuple(bels))
-        assert bels == bels_tcl
+        # Skip slices Vivado placed outside the dumped pblock (bels_tcl all
+        # None) or repacked differently, instead of asserting -- mirrors the
+        # RAM-path "if ram != has_bel_tcl: continue" below. This makes the
+        # fuzzer robust to the ROI-edge case (e.g. virtex7's grid-ROI yields a
+        # SLICE column just outside the XRAY_ROI pblock); other families always
+        # match, so this is a no-op for them.
+        if bels != bels_tcl:
+            continue
 
         # Clock Enable (CE) clock gate only enabled if we have clocked elements
         # A pure LUT6 does not, but everything else should

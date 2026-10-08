@@ -31,7 +31,9 @@ def gen_sites():
             continue
         tile_list.append(tile_name)
 
-    get_xy = util.create_xy_fun('RIOB18_')
+    # Virtex-7 exposes both L- and R-side IOB18 tiles (kintex7's ROI only had
+    # the R side), so match either prefix when extracting the (X,Y) sort key.
+    get_xy = util.create_xy_fun('[LR]IOB18_')
     tile_list.sort(key=get_xy)
 
     for iob_tile_name in tile_list:

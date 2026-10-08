@@ -46,6 +46,7 @@ to develop a free and open Verilog to bitstream toolchain for these devices.
    db_dev_process/minitests/index
    db_dev_process/parts
    db_dev_process/newpart
+   db_dev_process/tilegrid_derivation
 
 .. toctree::
    :maxdepth: 2

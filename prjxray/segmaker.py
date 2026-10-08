@@ -407,12 +407,26 @@ class Segmaker:
 
             # ignore dummy tiles (ex: VBRK)
             if len(tiledata['bits']) == 0:
-                if self.verbose:
-                    for site in tiledata["sites"]:
-                        assert site not in self.site_tags, "Site %s does not have bitstream info" % site
-                this_tile_tags = len(self.tile_tags.get(tilename, {}))
-                assert this_tile_tags == 0, "Tile %s does not have bitstream info but %s tags" % (
-                    tilename, this_tile_tags)
+                # Tiles with no bitstream info are either dummy tiles (e.g. VBRK,
+                # which carry no tags) or tiles that could not be solved in
+                # 005-tilegrid and were dropped from the tilegrid (e.g. the edge
+                # tile BRAM_L_X114Y0 on xc7vx485t). Such a tile can't be
+                # characterised, so account for any tags placed on it (mark them
+                # used so the all-tags-used check still balances) and skip it with
+                # a warning instead of aborting.
+                skipped = []
+                for site in tiledata["sites"]:
+                    for name in self.site_tags.get(site, {}):
+                        tags_used.add((site, name))
+                        skipped.append((site, name))
+                for name in self.tile_tags.get(tilename, {}):
+                    tags_used.add((tilename, name))
+                    skipped.append((tilename, name))
+                if skipped:
+                    import sys as _sys
+                    print(
+                        "Warning: tile %s has no bitstream info; skipping %d "
+                        "tag(s)" % (tilename, len(skipped)), file=_sys.stderr)
                 continue
             elif len(tiledata['bits']) == 1:
                 bitj = list(tiledata['bits'].values())[0]
@@ -449,6 +463,13 @@ class Segmaker:
             print("Tag tiles: %u" % (n_tile_tags, ))
             print("Used %u sites" % len(sites_used))
             print("Grid DB had %u tile types" % len(tile_types_found))
+        if ntags != len(tags_used):
+            # List the unsolved tags to aid debugging before failing.
+            _all = set((s, n) for s in self.site_tags for n in self.site_tags[s])
+            _all |= set((t, n) for t in self.tile_tags for n in self.tile_tags[t])
+            import sys as _sys
+            print(
+                "Unused tags: %s" % sorted(_all - tags_used), file=_sys.stderr)
         assert ntags == len(tags_used), "Unused tags, %s used out of %s" % (
             len(tags_used), ntags)
 

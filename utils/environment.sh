@@ -6,7 +6,7 @@
 # https://opensource.org/licenses/ISC
 #
 # SPDX-License-Identifier: ISC
-XRAY_ENV_PATH="${BASH_SOURCE[0]}"
+XRAY_ENV_PATH="${BASH_SOURCE[0]:-$0}"
 while [ -h "$XRAY_ENV_PATH" ]; do # resolve $XRAY_ENV_PATH until the file is no longer a symlink
   XRAY_UTILS_DIR="$( cd -P "$( dirname "$XRAY_ENV_PATH" )" && pwd )"
   XRAY_ENV_PATH="$(readlink "$XRAY_ENV_PATH")"
@@ -24,6 +24,13 @@ if [ -e "${XRAY_DIR}/env/bin/activate" ]; then
 fi
 
 # misc
+# The I/O standard the fuzzers drive their ROI pins with.  Only virtex7 needs a
+# different one (its HP banks are 1.8 V) and settings/virtex7.sh sets it before
+# sourcing this file; every other family runs the high-range default, which is
+# the same fallback the python fuzzers already use (fuzzers/039-hclk-config,
+# fuzzers/039a-hclk-bufrclk-perfclk).  Without it the tcl fuzzers abort with
+# "no such variable ::env(XRAY_IOSTANDARD)".
+export XRAY_IOSTANDARD="${XRAY_IOSTANDARD:-LVCMOS33}"
 export XRAY_PART_YAML="${XRAY_DATABASE_DIR}/${XRAY_DATABASE}/${XRAY_PART}/part.yaml"
 source $XRAY_UTILS_DIR/environment.python.sh
 
@@ -46,11 +53,13 @@ export XRAY_PARSEDB="python3 ${XRAY_UTILS_DIR}/parsedb.py"
 export XRAY_TCL_REFORMAT="${XRAY_UTILS_DIR}/tcl-reformat.sh"
 export XRAY_VIVADO="${XRAY_UTILS_DIR}/vivado.sh"
 
-# Verify an approved version is in use
-export XRAY_VIVADO_SETTINGS="${XRAY_VIVADO_SETTINGS:-/opt/Xilinx/Vivado/2017.2/settings64.sh}"
-# Vivado v2017.2 (64-bit)
-if [ "$(${XRAY_VIVADO} -h |grep Vivado |cut -d\  -f 2)" != "v2017.2" ] ; then
-    echo "Requires Vivado 2017.2. See https://github.com/SymbiFlow/prjxray/issues/14"
+# Verify an approved version is in use.  XRAY_VIVADO_VERSION lets a lab select
+# a different release without editing this file; the database is generated from
+# whatever Vivado reports here, so it is worth stating explicitly.
+export XRAY_VIVADO_SETTINGS="${XRAY_VIVADO_SETTINGS:-/tools/Xilinx/Vivado/2024.1/settings64.sh}"
+export XRAY_VIVADO_VERSION="${XRAY_VIVADO_VERSION:-v2024.1}"
+if [ "$(${XRAY_VIVADO} -h |grep Vivado |cut -d\  -f 2)" != "${XRAY_VIVADO_VERSION}" ] ; then
+    echo "Requires Vivado ${XRAY_VIVADO_VERSION#v}; set XRAY_VIVADO_VERSION to use another."
     # Can't exit since sourced script
     # Trash a key environment variable to preclude use
     export XRAY_DIR="/bad/vivado/version"

@@ -56,6 +56,12 @@ class Frames {
 	// .frm instead; there is nothing left to fill in. See
 	// Configuration::createPartialPacketData.
 
+	// Returns the addresses in the container that the part does not have,
+	// in address order. Such a frame would still be written to the
+	// bitstream, and every frame after it would land at the wrong address.
+	std::vector<typename ArchType::FrameAddress> findFramesNotInPart(
+	    const absl::optional<typename ArchType::Part>& part);
+
 	// Returns the map with frame addresses and corresponding data
 	Frames2Data& getFrames() { return frames_data_; }
 
@@ -155,6 +161,20 @@ void Frames<ArchType>::addMissingFrames(
 		current_frame_address =
 		    part->GetNextFrameAddress(*current_frame_address);
 	} while (current_frame_address);
+}
+
+template <typename ArchType>
+std::vector<typename ArchType::FrameAddress>
+Frames<ArchType>::findFramesNotInPart(
+    const absl::optional<typename ArchType::Part>& part) {
+	std::vector<typename ArchType::FrameAddress> not_in_part;
+	for (auto& frame : frames_data_) {
+		const bool in_part = part->IsValidFrameAddress(frame.first);
+		if (!in_part) {
+			not_in_part.push_back(frame.first);
+		}
+	}
+	return not_in_part;
 }
 
 }  // namespace xilinx

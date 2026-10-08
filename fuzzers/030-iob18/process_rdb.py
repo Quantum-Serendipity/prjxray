@@ -17,6 +17,7 @@ There are couple cases that need to be handled here:
   can be merged to provide unique "(IOSTANDARD, DRIVE)" bit sets.
 """
 import argparse
+import os
 
 
 def get_name(l):
@@ -172,6 +173,14 @@ def process_features_sets(iostandard_lines):
                 if enum is not None:
                     common_groups[site][(bits, group)]['enums'].add(enum)
 
+    # On Virtex-7 some Y1 IN groups differ from their Y0 counterparts by a
+    # single bit (e.g. LVCMOS* sets 39_01 while SSTL* does not), so the
+    # name-harmonisation below must not fold two distinct-bit groups onto one
+    # feature name -- doing so emits duplicate db lines that break dbfixup.
+    # Require identical bits before adopting a visited name for virtex7; other
+    # families never produce two-group Y1 IN splits, so they are unaffected.
+    require_same_bits = os.environ.get('XRAY_DATABASE') == 'virtex7'
+
     visited_iostandards = list()
     for site, groups in common_groups.items():
         for (bits, group), v in groups.items():
@@ -184,17 +193,19 @@ def process_features_sets(iostandard_lines):
             #
             # The following code makes sure that the same set of iostandards
             # (even if not really present at a site location) appears for each site
-            for visited_iostandard, visited_group, visited_enums in visited_iostandards:
+            for visited_iostandard, visited_group, visited_enums, visited_bits in visited_iostandards:
                 same_enum = enums == visited_enums
                 same_group = group == visited_group
                 compatible_iostd = any(
                     x in iostandards for x in visited_iostandard)
                 take_visited_iostd = len(visited_iostandard) > len(iostandards)
-                if same_enum and same_group and compatible_iostd and take_visited_iostd:
+                same_bits = bits == visited_bits
+                if same_enum and same_group and compatible_iostd and take_visited_iostd \
+                        and (same_bits or not require_same_bits):
                     iostandards = visited_iostandard
                     break
 
-            visited_iostandards.append((iostandards, group, enums))
+            visited_iostandards.append((iostandards, group, enums, bits))
 
             iostandards_string = '_'.join(sorted(iostandards))
 

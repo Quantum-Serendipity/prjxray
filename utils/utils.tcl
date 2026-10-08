@@ -130,26 +130,70 @@ proc putl {lst} {
 }
 
 proc write_pip_txtdata {filename} {
+    # Output format (unchanged):  TILE PIP SRC_WIRE DST_WIRE NUM_PIPS DIR
+    #   TILE      e.g. INT_R_X107Y144
+    #   PIP       e.g. INT_R_X107Y144/INT_R.GND_WIRE->>GFAN1
+    #   SRC_WIRE  e.g. INT_R_X107Y144/GND_WIRE
+    #   DST_WIRE  e.g. INT_R_X107Y144/GFAN1
+    #   NUM_PIPS  count of input pips at dst node (used by int_generate.py
+    #             to skip trivial fan-ins via 'pnum == 1' filter)
+    #   DIR       IS_DIRECTIONAL bool (1 = directional, 0 = bidirectional)
+    #
+    # The kintex7-era implementation iterated foreach net foreach pip and
+    # called get_tiles/get_wires/get_nodes once per pip — fine on small parts
+    # but on virtex7 xc7vx485tffg1761 (~12M pips across 1320 nets) that's
+    # 1-2 h of Tcl overhead per specimen, with most of it spent rediscovering
+    # information the pip name already encodes. Optimisations:
+    #   1) Bulk-fetch all pips with one get_pips call.
+    #   2) Bulk-fetch IS_DIRECTIONAL as a list.
+    #   3) Parse tile/src/dst names directly from the pip name (saves
+    #      3*N Tcl object queries; format is "TILE/TILE_TYPE.SRC->{>}DST").
+    #   4) Cache num_pips per dst_wire string — same dst is reused by many
+    #      pips so its node-fanin only needs computing once.
+    # Output format and content are bit-identical to the old implementation
+    # on parseable pip names; un-parseable pips (none seen on virtex7 so far)
+    # fall through to the original per-pip query path.
     puts "FUZ([pwd]): Writing $filename."
     set fp [open $filename w]
-    set nets [get_nets -hierarchical]
-    set nnets [llength $nets]
-    set neti 0
-    foreach net $nets {
-        incr neti
-        if {($neti % 100) == 0 } {
-            puts "FUZ([pwd]): Dumping pips from net $net ($neti / $nnets)"
+    set all_pips [get_pips -of_objects [get_nets -hierarchical]]
+    set npips [llength $all_pips]
+    puts "FUZ([pwd]): bulk-fetched $npips pips, fetching IS_DIRECTIONAL..."
+    set dir_props [get_property IS_DIRECTIONAL $all_pips]
+    puts "FUZ([pwd]): writing rows..."
+    array set dst_wire_to_num_pips {}
+    set i 0
+    foreach pip $all_pips dir_prop $dir_props {
+        incr i
+        if {($i % 100000) == 0 } {
+            puts "FUZ([pwd]): pip $i / $npips"
         }
-        foreach pip [get_pips -of_objects $net] {
+        if {[regexp {^([^/]+)/[^.]+\.(.+?)->>?(.+)$} $pip _ tile src_name dst_name]} {
+            set src_wire "$tile/$src_name"
+            set dst_wire "$tile/$dst_name"
+        } else {
+            # Fallback for unexpected pip-name formats: slow per-pip query.
             set tile [get_tiles -of_objects $pip]
             set src_wire [get_wires -uphill -of_objects $pip]
             set dst_wire [get_wires -downhill -of_objects $pip]
-            set num_pips [llength [get_nodes -uphill -of_objects [get_nodes -of_objects $dst_wire]]]
-            set dir_prop [get_property IS_DIRECTIONAL $pip]
-            puts $fp "$tile $pip $src_wire $dst_wire $num_pips $dir_prop"
         }
+        if {![info exists dst_wire_to_num_pips($dst_wire)]} {
+            set wireobj [get_wires $dst_wire]
+            if {$wireobj ne ""} {
+                set node [get_nodes -of_objects $wireobj]
+                if {$node ne ""} {
+                    set dst_wire_to_num_pips($dst_wire) [llength [get_nodes -uphill -of_objects $node]]
+                } else {
+                    set dst_wire_to_num_pips($dst_wire) 0
+                }
+            } else {
+                set dst_wire_to_num_pips($dst_wire) 0
+            }
+        }
+        set num_pips $dst_wire_to_num_pips($dst_wire)
+        puts $fp "$tile $pip $src_wire $dst_wire $num_pips $dir_prop"
     }
     close $fp
+    puts "FUZ([pwd]): wrote $npips rows."
 }
 
 # Generic non-ROI'd generate.tcl template

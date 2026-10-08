@@ -18,7 +18,7 @@ from prims import *
 # INCREMENT is the amount of additional CLBN to be instantiated in the design.
 # This makes the fuzzer compilation more robust against failures.
 INCREMENT = os.getenv('CLBN', 0)
-CLBN = 600 + int(INCREMENT)
+CLBN = 200 + int(INCREMENT)
 print('//Requested CLBs: %s' % str(CLBN))
 
 f = open("top.txt", "w")

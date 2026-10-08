@@ -17,7 +17,7 @@ from prjxray import verilog
 from prjxray import lut_maker
 from prjxray.db import Database
 
-NOT_INCLUDED_TILES = ['RIOI_SING']
+NOT_INCLUDED_TILES = ['RIOI_SING', 'LIOI_SING']
 
 SITE_TYPES = ['OLOGICE2', 'ILOGICE2']
 

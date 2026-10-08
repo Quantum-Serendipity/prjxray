@@ -369,7 +369,8 @@ def propagate_IOB_SING(database, tiles_by_grid):
         if tile in seen_iobs:
             continue
 
-        if database[tile]["type"] not in ["LIOB33", "RIOB33", "RIOB18"]:
+        if database[tile]["type"] not in ["LIOB33", "RIOB33", "LIOB18",
+                                          "RIOB18"]:
             continue
 
         while True:
@@ -405,8 +406,19 @@ def propagate_IOB_SING(database, tiles_by_grid):
         database[top_tile]['bits']['CLB_IO_CLK'] = copy.deepcopy(bits)
         database[top_tile]['bits']['CLB_IO_CLK']['words'] = 2
         database[top_tile]['bits']['CLB_IO_CLK']['offset'] = 99
+        # IOB33 (HR) and IOB18 (HP) are both 4-word tiles: Y1 lives in
+        # relative words 0-1, Y0 in 2-3. nextpnr (classic and himbaechel)
+        # writes IOB_Y1 on a top SING, so start_offset 0 puts that at abs
+        # 99-100, inside the SING's own window. start_offset 2 put it at
+        # abs 97-98, in the neighbour full tile.
+        # HR: Vivado 2026.1 on xc7s25 (J6 / RIOB33_SING_X31Y49).
+        # HP: Jonathan's 036-iob18-ologic-sing specimens on xc7vx485t
+        # (50/50 top-SING FASM lines reproduce with 0, 0/50 with 2).
+        # 0e3f20b5's VC707 "HW-verified" 2 assembled OLOGIC_Y0 into 99-100;
+        # nextpnr and the specimens name that site Y1.
+        prev_type = database[prev_tile]['type']
         database[top_tile]['bits']['CLB_IO_CLK']['alias'] = {
-            'type': database[prev_tile]['type'],
+            'type': prev_type,
             'start_offset': 0,
             'sites': {
                 'IOB33_Y0': 'IOB33_Y1',
@@ -439,7 +451,7 @@ def propagate_IOI_SING(database, tiles_by_grid):
         if tile in seen_iois:
             continue
 
-        if database[tile]["type"] not in ["LIOI3", "RIOI3", "RIOI"]:
+        if database[tile]["type"] not in ["LIOI3", "RIOI3", "LIOI", "RIOI"]:
             continue
 
         while True:
@@ -480,8 +492,13 @@ def propagate_IOI_SING(database, tiles_by_grid):
         database[top_tile]['bits']['CLB_IO_CLK'] = copy.deepcopy(bits)
         database[top_tile]['bits']['CLB_IO_CLK']['words'] = 2
         database[top_tile]['bits']['CLB_IO_CLK']['offset'] = 99
+        # IOI3 (HR) and IOI (HP): same 4-word geometry as IOB33/IOB18 --
+        # Y1 is relative words 0-1, so start_offset 0 for the top SING.
+        # HP measured on Jonathan's 036-iob18-ologic-sing xc7vx485t
+        # specimens (50/50). See propagate_IOB_SING.
+        prev_type = database[prev_tile]['type']
         database[top_tile]['bits']['CLB_IO_CLK']['alias'] = {
-            'type': database[prev_tile]['type'],
+            'type': prev_type,
             'start_offset': 0,
             'sites': {}
         }
@@ -518,6 +535,48 @@ def propagate_IOI_Y9(database, tiles_by_grid):
         database[tile]['bits']['CLB_IO_CLK'] = copy.deepcopy(bits)
         database[tile]['bits']['CLB_IO_CLK']['words'] = 4
         database[tile]['bits']['CLB_IO_CLK']['offset'] = 18
+
+
+def propagate_CFG_CENTER_MID(database, tiles_by_grid, tile_frames_map):
+    """ Give CFG_CENTER_MID its base address when the cfg fuzzer could not.
+
+    The cfg sub-fuzzer solves this tile by sweeping BSCANE2's JTAG_CHAIN
+    between 1 and 2.  On spartan7 Vivado writes the JTAG_CHAIN_1 bit whichever
+    value the netlist asks for, so the tag never toggles, segmatch reports
+    "<0 candidates>" and the tile ends up with no bits at all: xc7s100 has
+    shipped that way since it was added, and utils/checkdb.py aborts on it with
+    "block type BlockType.CLB_IO_CLK is not present in current tile".
+
+    Nothing about the address is unknown, though.  CFG_CENTER_MID spans its
+    whole clock-region row -- offset 0, 101 words, as in every device model in
+    the database -- and its configuration column is measured by the cfg_int
+    fuzzer on the INT tiles of that same column.  Take it from there, and leave
+    a tile the cfg fuzzer did solve alone.
+    """
+    for tile_name in sorted(database.keys()):
+        tile = database[tile_name]
+        if tile['type'] != 'CFG_CENTER_MID' or tile['bits']:
+            continue
+        # walk right along the row to the interconnect column of this
+        # configuration column
+        grid_x = tile['grid_x']
+        while True:
+            grid_x += 1
+            neighbour = tiles_by_grid.get((grid_x, tile['grid_y']))
+            if neighbour is None:
+                break
+            ntile = database[neighbour]
+            if ntile['type'] not in ('INT_L', 'INT_R'):
+                continue
+            bits = ntile['bits'].get('CLB_IO_CLK')
+            if bits is None:
+                break
+            baseaddr = int(bits['baseaddr'], 0)
+            localutil.add_tile_bits(
+                tile_name, tile, baseaddr, 0,
+                tile_frames_map.get_tile_frames(baseaddr), 101,
+                tile_frames_map)
+            break
 
 
 def alias_HCLKs(database):
@@ -564,6 +623,7 @@ def run(json_in_fn, json_out_fn, verbose=False):
     propagate_IOB_SING(database, tiles_by_grid)
     propagate_IOI_SING(database, tiles_by_grid)
     propagate_IOI_Y9(database, tiles_by_grid)
+    propagate_CFG_CENTER_MID(database, tiles_by_grid, tile_frames_map)
     alias_HCLKs(database)
 
     # Save

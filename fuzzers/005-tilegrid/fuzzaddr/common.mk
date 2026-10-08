@@ -9,7 +9,13 @@ database: $(BUILD_DIR)/segbits_tilegrid.tdb
 $(BUILD_DIR)/segbits_tilegrid.tdb: $(SPECIMENS_OK)
 	${XRAY_SEGMATCH} -o $(BUILD_DIR)/segbits_tilegrid.tdb $$(find $(BUILD_DIR) -name "segdata_tilegrid.txt")
 
+# Retry a specimen up to 3 times: Vivado's FlexLM license manager can crash
+# (SIGSEGV in libXil_lmgr11/freeaddrinfo) under concurrent license checkouts.
+# Such crashes are transient and unrelated to the design, so retry before giving
+# up. The success path is unchanged (first attempt short-circuits the chain).
 $(SPECIMENS_OK):
+	GENERATE_ARGS=${GENERATE_ARGS} bash ../fuzzaddr/generate.sh $(subst /OK,,$@) || \
+	GENERATE_ARGS=${GENERATE_ARGS} bash ../fuzzaddr/generate.sh $(subst /OK,,$@) || \
 	GENERATE_ARGS=${GENERATE_ARGS} bash ../fuzzaddr/generate.sh $(subst /OK,,$@)
 	touch $@
 

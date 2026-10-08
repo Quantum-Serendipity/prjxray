@@ -319,6 +319,21 @@ class FasmAssembler(object):
             self.add_fasm_line(line, missing_features)
 
         if missing_features:
+            # Allow the assembler to keep going when only a small number of
+            # niche segbits (e.g. IOB_Y1.IBUF_HP_BANK_GLUE — not yet fuzzed
+            # for the slave side) are missing.  The resulting bitstream is
+            # missing those bits — Vivado's silicon defaults usually cover
+            # them — and the user gets a console warning per missing line.
+            # Set XRAY_ALLOW_MISSING_FEATURES=1 to opt in.
+            import os
+            if os.environ.get("XRAY_ALLOW_MISSING_FEATURES") == "1":
+                import sys
+                print("WARNING: " + str(len(missing_features))
+                        + " missing-feature lines suppressed by "
+                        "XRAY_ALLOW_MISSING_FEATURES=1:", file=sys.stderr)
+                for m in missing_features:
+                    print("  " + m, file=sys.stderr)
+                return
             raise FasmLookupError('\n'.join(missing_features))
 
         # Report ROI violations as soon as the input is exhausted, so the

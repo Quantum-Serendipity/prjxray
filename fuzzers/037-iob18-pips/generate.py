@@ -72,8 +72,12 @@ def main():
     for tile, pips_srcs_dsts in tiledata.items():
         tile_type = pips_srcs_dsts["type"]
 
+        # Normalise per-instance tile types (e.g. RIOI_TBYTESRC, LIOI_SING) to
+        # the base type used as pipdata key by ioi_pip_list.tcl.
         if tile_type.startswith('RIOI'):
             tile_type = 'RIOI'
+        elif tile_type.startswith('LIOI'):
+            tile_type = 'LIOI'
 
         for src, dst in pipdata[tile_type]:
             if (src, dst) in ignpip:

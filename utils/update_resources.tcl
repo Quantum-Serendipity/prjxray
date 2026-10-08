@@ -13,8 +13,12 @@ link_design -part $::env(XRAY_PART)
 # one pin -> 0
 set clk_pins [get_package_pins -filter "IS_CLK_CAPABLE"]
 
-# three pins -> 1, 2, 3 on HR banks only
+# three pins -> 1, 2, 3 on HR banks. High-performance-bank-only parts (e.g.
+# Virtex-7 "VX" devices) have no high-range banks, so fall back to HP banks.
 set banks [get_iobanks -filter "BANK_TYPE==BT_HIGH_RANGE"]
+if {$banks == ""} {
+    set banks [get_iobanks -filter "BANK_TYPE==BT_HIGH_PERFORMANCE"]
+}
 
 set data_pins ""
 foreach bank [split $banks " "] {

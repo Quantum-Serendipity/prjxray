@@ -228,6 +228,18 @@ case "$1" in
 	riob18)
 		sed < "$2" > "$tmp1" -e 's/^IOB18\./RIOB18./' ;;
 
+	liob18)
+		sed < "$2" > "$tmp1" -e 's/^IOB18\./LIOB18./' ;;
+
+	riob18_sing)
+		sed < "$2" > "$tmp1" -e 's/^IOB18\./RIOB18_SING./' ;;
+
+	liob18_sing)
+		sed < "$2" > "$tmp1" -e 's/^IOB18\./LIOB18_SING./' ;;
+
+	mask_liob18)
+		sed < "$2" > "$tmp1" -e 's/^IOB18\./LIOB18./' ;;
+
 	lioi3)
 		sed < "$2" > "$tmp1" -e 's/^IOI3\./LIOI3./' ;;
 
@@ -254,6 +266,24 @@ case "$1" in
 
 	rioi_tbyteterm)
 		sed < "$2" > "$tmp1" -e 's/^IOI\./RIOI_TBYTETERM./' ;;
+
+	lioi)
+		sed < "$2" > "$tmp1" -e 's/^IOI\./LIOI./' ;;
+
+	lioi_tbytesrc)
+		sed < "$2" > "$tmp1" -e 's/^IOI\./LIOI_TBYTESRC./' ;;
+
+	lioi_tbyteterm)
+		sed < "$2" > "$tmp1" -e 's/^IOI\./LIOI_TBYTETERM./' ;;
+
+	lioi_sing)
+		# 036-iob18-ologic-sing fuzzer emits LIOI_SING. / RIOI_SING.
+		# entries in one file; for the lioi_sing target keep only
+		# the LIOI_SING.* rows and pass them through verbatim.
+		grep '^LIOI_SING\.' "$2" > "$tmp1" || true ;;
+
+	rioi_sing)
+		grep '^RIOI_SING\.' "$2" > "$tmp1" || true ;;
 
 	cmt_top_r_upper_t)
 		sed < "$2" > "$tmp1" -e 's/^CMT_UPPER_T\./CMT_TOP_R_UPPER_T./' ;;

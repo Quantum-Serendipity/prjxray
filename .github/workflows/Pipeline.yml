@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        family: ['artix7', 'zynq7', 'kintex7', 'spartan7']
+        family: ['artix7', 'zynq7', 'kintex7', 'spartan7', 'virtex7']
 
     env:
       GHA_SSH_TUNNEL_KEY: "${{ secrets.LICENSE_TUNNEL_KEY_DATA }}"

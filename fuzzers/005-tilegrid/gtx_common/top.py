@@ -24,6 +24,18 @@ def gen_sites():
 
         for site_name, site_type in gridinfo.sites.items():
             if site_type in ['GTXE2_COMMON']:
+                # XRAY_GTX_SITES restricts the fuzz to a comma-separated list of
+                # site names.  Needed on virtex7: the xc7vx485t-ffg1761 package
+                # bonds only about half its GTX quads, and an UNBONDED quad
+                # cannot be placed, so fuzzing every site fails the whole run --
+                # which is why 005-tilegrid skips GTX for virtex7 entirely.
+                # Restricting to a bonded quad measures the tiles that a real
+                # design actually uses (this board's SGMII sits on
+                # GTXE2_CHANNEL_X1Y* / GTXE2_COMMON_X1Y0) and leaves the
+                # unbonded ones legitimately unmeasured.
+                want = os.getenv("XRAY_GTX_SITES")
+                if want and site_name not in want.split(','):
+                    continue
                 yield tile_name, site_name
 
 

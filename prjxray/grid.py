@@ -144,6 +144,16 @@ class Grid(object):
                 any_alias = True
 
         if any_alias:
+            # Prefer the tile type's OWN segbits database when one
+            # exists (e.g. segbits_liob18_sing.db): its bit positions
+            # are in the tile's native window.  The alias path is a
+            # fallback for tile types fuzzed only via their alias; on
+            # virtex7 IOB SING tiles the alias metadata is wrong (site
+            # map names IOB33, start_offset misplaces the words) and
+            # silently corrupts neighbouring tiles' frames.
+            tile_db = self.db.tile_types.get(gridinfo.tile_type)
+            if tile_db is not None and tile_db.segbits is not None:
+                return self.db.get_tile_segbits(gridinfo.tile_type)
             return TileSegbitsAlias(self.db, gridinfo.tile_type, gridinfo.bits)
         else:
             return self.db.get_tile_segbits(gridinfo.tile_type)

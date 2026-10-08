@@ -62,13 +62,27 @@ proc write_tiles_txt {} {
 }
 
 proc run {} {
-    # Generate grid of entire part
-    make_project_roi XRAY_ROI_TILEGRID XRAY_EXCLUDE_ROI_TILEGRID
+    # Read the grid off a device with NOTHING placed on it.  SITE_TYPE reports
+    # the type a site is currently configured as, so any cell placed first
+    # rewrites it: a BUFG cell turns a BUFGCTRL site into "BUFG", assigning a
+    # port to a package pin collapses IOB33M/IOB33S to "IOB33", and a RAMB36
+    # cell collapses RAMBFIFO36E1 to "RAMB36E1".  Those names go straight into
+    # tilegrid.json, and the sub-fuzzers of this same fuzzer then select their
+    # sites by site type, so the damage compounds: with BUFGCTRL_X0Y0..2 read
+    # as "BUFG", 005-tilegrid/clk_bufg silently measures BUFGCTRL_X0Y10 instead
+    # of X0Y0 and lands CLK_BUFG_BOT_R five words past its real base address.
+    # Nothing write_tiles_txt reads (TYPE, GRID_POINT_*, SITE_TYPE, PROHIBIT,
+    # CLOCK_REGION, PIN_FUNC) needs a design, so open the part and stop there.
+    create_project -force -part $::env(XRAY_PART) design design
+    link_design -part $::env(XRAY_PART)
 
-    place_design
-    route_design
-    write_checkpoint -force design.dcp
-    write_bitstream -force design.bit
+    # XRAY_EXCLUDE_ROI_TILEGRID names the tiles write_tiles_txt must replace
+    # with NULL; it reads them back through this pblock.
+    create_pblock exclude_roi
+    foreach roi "$::env(XRAY_EXCLUDE_ROI_TILEGRID)" {
+        puts "EXCLUDE ROI: $roi"
+        resize_pblock [get_pblocks exclude_roi] -add "$roi"
+    }
 
     write_tiles_txt
 }
