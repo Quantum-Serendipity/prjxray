@@ -385,6 +385,15 @@ foreach tile_type {CFG_CENTER_TOP CFG_CENTER_MID CFG_CENTER_BOT} {
     }
 }
 
+foreach tile_type {MONITOR_BOT MONITOR_MID MONITOR_TOP MONITOR_BOT_FUJI2 MONITOR_MID_FUJI2 MONITOR_TOP_FUJI2 \
+            MONITOR_BOT_PELE1 MONITOR_MID_PELE1 MONITOR_TOP_PELE1} {
+    set tiles [get_tiles -filter "TILE_TYPE == $tile_type"]
+    if {[llength $tiles] != 0} {
+        set tile [lindex $tiles 0]
+        write_cfg_ppips_db "ppips_[string tolower $tile_type].db" $tile
+    }
+}
+
 foreach tile_type {DSP_L DSP_R} {
     set tiles [get_tiles -filter "TILE_TYPE == $tile_type"]
     if {[llength $tiles] != 0} {
