@@ -43,7 +43,18 @@ def check_tag_name(tag):
     return True
 
 
-def run(fn_ins, fn_out, strict=False, track_origin=False, verbose=False):
+def run(
+        fn_ins,
+        fn_out,
+        strict=False,
+        track_origin=False,
+        verbose=False,
+        origin_label=None):
+    if origin_label is None:
+        origin_label = os.path.basename(os.getcwd())
+    assert not track_origin or (
+        origin_label and not any(c in origin_label for c in ' ,\t\n')), \
+        "origin label must be one token with no comma: %r" % (origin_label, )
     # tag to bits
     entries = {}
     # tag to (bits, line)
@@ -69,7 +80,7 @@ def run(fn_ins, fn_out, strict=False, track_origin=False, verbose=False):
                     print("  Orig line: %s" % orig_line, file=sys.stderr)
                     print("  New line : %s" % line, file=sys.stderr)
                     assert not strict, "strict: got duplicate tag"
-                origin = os.path.basename(os.getcwd())
+                origin = origin_label
                 if track_origin and orig_origin is not None:
                     origins = orig_origin.split(",")
                     if origin not in origins:
@@ -86,7 +97,7 @@ def run(fn_ins, fn_out, strict=False, track_origin=False, verbose=False):
                     assert not strict, "strict: got duplicate bits"
 
             if track_origin and origin is None:
-                origin = os.path.basename(os.getcwd())
+                origin = origin_label
             entries[tag] = (bits, origin)
             tags[tag] = (bits, line, origin)
             if bits != None:
@@ -104,6 +115,10 @@ def main():
     parser.add_argument('--verbose', action='store_true', help='')
     parser.add_argument('--track_origin', action='store_true', help='')
     parser.add_argument('--out', help='')
+    parser.add_argument(
+        '--origin',
+        help='origin recorded for lines this merge adds or changes; '
+        'default: the current directory name, which is the fuzzer for a pushdb')
     parser.add_argument('ins', nargs='+', help='Last takes precedence')
     args = parser.parse_args()
 
@@ -112,7 +127,8 @@ def main():
         args.out,
         strict=int(os.getenv("MERGEDB_STRICT", "1")),
         track_origin=args.track_origin,
-        verbose=args.verbose)
+        verbose=args.verbose,
+        origin_label=args.origin)
 
 
 if __name__ == '__main__':
