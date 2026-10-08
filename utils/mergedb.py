@@ -70,8 +70,11 @@ def run(fn_ins, fn_out, strict=False, track_origin=False, verbose=False):
                     print("  New line : %s" % line, file=sys.stderr)
                     assert not strict, "strict: got duplicate tag"
                 origin = os.path.basename(os.getcwd())
-                if track_origin and orig_origin != origin:
-                    origin = orig_origin + "," + origin
+                if track_origin and orig_origin is not None:
+                    origins = orig_origin.split(",")
+                    if origin not in origins:
+                        origins.append(origin)
+                    origin = ",".join(origins)
             if bits in bitss:
                 orig_tag, orig_line = bitss[bits]
                 if orig_tag != tag:
