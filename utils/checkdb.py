@@ -147,7 +147,6 @@ def parsedb_all(db_root, verbose=False, aliases=None):
 
     files = 0
     for bit_fn in glob.glob('%s/segbits_*.db' % db_root):
-        # Don't parse db files with fuzzer origin information
         if "origin_info" in bit_fn:
             continue
         verbose and print("Checking %s" % bit_fn)
@@ -163,6 +162,60 @@ def parsedb_all(db_root, verbose=False, aliases=None):
             bit_fn, fnout=None, strict=True, verbose=verbose, aliases=aliases)
         files += 1
     print("mask_*.db: %d okay" % files)
+
+
+def read_tag_bits(fn, require_origin):
+    entries = {}
+    with util.OpenSafeFile(fn) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            tag, bits, mode, origin = util.parse_db_line(line)
+            assert not require_origin or origin, \
+                "%s: line carries no origin: %s" % (fn, line)
+            entries[tag] = bits if bits is not None else mode
+    return entries
+
+
+def check_origin_info(db_root, verbose=False, aliases=None, drift_fatal=False):
+    '''Verify each segbits_*.origin_info.db, and compare it to its segbits file'''
+
+    files = 0
+    drifted = []
+    for origin_fn in sorted(glob.glob('%s/segbits_*.origin_info.db' % db_root)):
+        verbose and print("Checking %s" % origin_fn)
+        parsedb.run(
+            origin_fn,
+            fnout=None,
+            strict=True,
+            verbose=verbose,
+            aliases=aliases)
+        origin_entries = read_tag_bits(origin_fn, require_origin=True)
+        segbits_fn = origin_fn.replace('.origin_info.db', '.db')
+        assert os.path.exists(segbits_fn), \
+            "%s has no companion %s" % (origin_fn, segbits_fn)
+        segbits_entries = read_tag_bits(segbits_fn, require_origin=False)
+        if origin_entries != segbits_entries:
+            only_origin = set(origin_entries) - set(segbits_entries)
+            only_segbits = set(segbits_entries) - set(origin_entries)
+            differ = [
+                tag for tag in set(origin_entries) & set(segbits_entries)
+                if origin_entries[tag] != segbits_entries[tag]
+            ]
+            drifted.append(
+                "%s: %d tag(s) only in origin_info, %d only in segbits, "
+                "%d with different bits" % (
+                    os.path.basename(origin_fn), len(only_origin),
+                    len(only_segbits), len(differ)))
+        files += 1
+    for message in drifted:
+        print("WARNING: origin_info drift: %s" % message)
+    print(
+        "segbits_*.origin_info.db: %d okay, %d drifted from segbits" %
+        (files, len(drifted)))
+    assert not (drift_fatal and drifted), \
+        "%d origin_info file(s) disagree with their segbits file" % len(drifted)
 
 
 def check_tile_overlap(db, verbose=False):
@@ -247,10 +300,15 @@ def check_tile_overlap(db, verbose=False):
     print("Checked %s tiles, %s bits" % (tiles_checked, bits_used))
 
 
-def run(db_root, part, verbose=False, aliases=None):
+def run(db_root, part, verbose=False, aliases=None, origin_drift_fatal=False):
     # Start by running a basic check on db files
     print("Checking individual .db...")
     parsedb_all(db_root, verbose=verbose, aliases=aliases)
+    check_origin_info(
+        db_root,
+        verbose=verbose,
+        aliases=aliases,
+        drift_fatal=origin_drift_fatal)
 
     # Now load and verify tile consistency
     db = prjxraydb.Database(db_root, part)
@@ -281,10 +339,20 @@ def main():
         '--alias-file',
         help='file of alias groups (see read_alias_file): features in one '
         'group may share a bit set')
+    parser.add_argument(
+        '--origin-drift-fatal',
+        action='store_true',
+        help='fail when a segbits_*.origin_info.db and its segbits_*.db do '
+        'not carry the same tags and bits')
     args = parser.parse_args()
 
     aliases = read_alias_file(args.alias_file) if args.alias_file else None
-    run(args.db_root, args.part, verbose=args.verbose, aliases=aliases)
+    run(
+        args.db_root,
+        args.part,
+        verbose=args.verbose,
+        aliases=aliases,
+        origin_drift_fatal=args.origin_drift_fatal)
 
 
 if __name__ == '__main__':
