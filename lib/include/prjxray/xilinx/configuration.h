@@ -1052,13 +1052,13 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 
 	// Internal state machine for writes.
 	bool start_new_write = false;
+	bool configuration_data_end = false;
 	typename ArchType::FrameAddress current_frame_address = 0;
 
 	absl::Span<const uint32_t> frame_buffer;
 	bool mfwr_has_own_far = false;
 
 	Configuration<ArchType>::FrameMap frames;
-	bool configuration_data_end = false;
 	for (auto packet : packets) {
 		if (packet.opcode() !=
 		    ConfigurationPacket<
@@ -1135,9 +1135,8 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 					current_frame_address =
 					    frame_address_register;
 					start_new_write = false;
+					configuration_data_end = false;
 				}
-				if (configuration_data_end)
-					break;
 
 				if (packet.data().size() >=
 				    ArchType::words_per_frame) {
@@ -1147,6 +1146,9 @@ Configuration<ArchType>::InitWithPackets(const typename ArchType::Part& part,
 					    ArchType::words_per_frame);
 					mfwr_has_own_far = false;
 				}
+
+				if (configuration_data_end)
+					break;
 
 				// Number of words in configuration frames
 				// depend on tje architecture.  Writes to this

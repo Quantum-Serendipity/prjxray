@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: ISC
  */
 #include <cstdint>
+#include <deque>
 #include <iostream>
 #include <vector>
 
@@ -1757,4 +1758,273 @@ TEST(ConfigurationTest, Cor1OverrideIsRefusedOnUltraScale) {
 			EXPECT_EQ(p->data()[0], 0x400000u);
 		}
 	EXPECT_EQ(writes, 1u);
+}
+
+namespace {
+
+ConfigurationPacket<Series7::ConfRegType> WritePacket(
+    Series7::ConfRegType reg,
+    const std::vector<uint32_t>& data,
+    unsigned int header_type = 0x1) {
+	return ConfigurationPacket<Series7::ConfRegType>(
+	    header_type,
+	    ConfigurationPacket<Series7::ConfRegType>::Opcode::Write, reg,
+	    absl::MakeConstSpan(data));
+}
+
+xc7series::Part MakeThreeFramePart() {
+	std::vector<xc7series::FrameAddress> addresses{0x4560, 0x4561, 0x4562};
+	return xc7series::Part(0x1234, addresses);
+}
+
+std::deque<std::vector<uint32_t>> frame_runs;
+
+const std::vector<uint32_t>& FrameRun(std::initializer_list<uint32_t> fills) {
+	frame_runs.emplace_back();
+	std::vector<uint32_t>& run = frame_runs.back();
+	for (uint32_t fill : fills)
+		run.insert(run.end(), Series7::words_per_frame, fill);
+	return run;
+}
+
+}  // namespace
+
+TEST(ConfigurationTest, PaddingAfterTheLastFrameDoesNotOverwriteIt) {
+	auto part = MakeThreeFramePart();
+
+	std::vector<uint32_t> idcode{0x1234};
+	std::vector<uint32_t> wcfg{0x1};
+	std::vector<uint32_t> far{0x4561};
+	const auto& payload = FrameRun({0xAA, 0xBB, 0x00});
+	const auto& padding = FrameRun({0xCC});
+
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> packets{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FAR, far),
+	    WritePacket(Series7::ConfRegType::FDRI, payload),
+	    WritePacket(Series7::ConfRegType::FDRI, padding),
+	};
+
+	auto config = Configuration<Series7>::InitWithPackets(part, packets);
+	ASSERT_TRUE(config);
+	EXPECT_EQ(config->frames().size(), 2u);
+	EXPECT_EQ(config->frames().at(0x4561),
+	          std::vector<uint32_t>(Series7::words_per_frame, 0xAA));
+	EXPECT_EQ(config->frames().at(0x4562),
+	          std::vector<uint32_t>(Series7::words_per_frame, 0xBB));
+}
+
+TEST(ConfigurationTest, NewWriteAfterTheLastFrameIsApplied) {
+	auto part = MakeThreeFramePart();
+
+	std::vector<uint32_t> idcode{0x1234};
+	std::vector<uint32_t> wcfg{0x1};
+	std::vector<uint32_t> far_last{0x4562};
+	std::vector<uint32_t> far_first{0x4560};
+
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> packets{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FAR, far_last),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xAA, 0x00})),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xCC})),
+	    WritePacket(Series7::ConfRegType::FAR, far_first),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xDD})),
+	    WritePacket(Series7::ConfRegType::FAR, far_last),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xEE, 0x00})),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xCC})),
+	};
+
+	auto config = Configuration<Series7>::InitWithPackets(part, packets);
+	ASSERT_TRUE(config);
+	EXPECT_EQ(config->frames().size(), 2u);
+	EXPECT_EQ(config->frames().at(0x4560),
+	          std::vector<uint32_t>(Series7::words_per_frame, 0xDD));
+	EXPECT_EQ(config->frames().at(0x4562),
+	          std::vector<uint32_t>(Series7::words_per_frame, 0xEE));
+}
+
+TEST(ConfigurationTest, TypeTwoContinuationAfterEndIsDropped) {
+	auto part = MakeThreeFramePart();
+	std::vector<uint32_t> idcode{0x1234}, wcfg{0x1}, far{0x4560}, empty;
+	const auto& payload = FrameRun({0xA0, 0xA1, 0xA2});
+	const auto& padding = FrameRun({0xCC, 0xCD});
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> p{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::FAR, far),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FDRI, empty),
+	    WritePacket(Series7::ConfRegType::FDRI, payload, 0x2),
+	    WritePacket(Series7::ConfRegType::FDRI, empty),
+	    WritePacket(Series7::ConfRegType::FDRI, padding, 0x2),
+	};
+	auto c = Configuration<Series7>::InitWithPackets(part, p);
+	ASSERT_TRUE(c);
+	ASSERT_EQ(c->frames().size(), 3u);
+	EXPECT_EQ(c->frames().at(0x4560)[0], 0xA0u);
+	EXPECT_EQ(c->frames().at(0x4561)[0], 0xA1u);
+	EXPECT_EQ(c->frames().at(0x4562)[0], 0xA2u);
+}
+
+TEST(ConfigurationTest, OnePacketRunningPastTheEndKeepsEveryRealFrame) {
+	auto part = MakeThreeFramePart();
+	std::vector<uint32_t> idcode{0x1234}, wcfg{0x1}, far{0x4561};
+	const auto& payload = FrameRun({0xB1, 0xB2, 0xEE, 0xEF, 0xF0});
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> p{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FAR, far),
+	    WritePacket(Series7::ConfRegType::FDRI, payload),
+	};
+	auto c = Configuration<Series7>::InitWithPackets(part, p);
+	ASSERT_TRUE(c);
+	ASSERT_EQ(c->frames().size(), 2u);
+	EXPECT_EQ(c->frames().at(0x4561)[0], 0xB1u);
+	EXPECT_EQ(c->frames().at(0x4562)[0], 0xB2u);
+}
+
+TEST(ConfigurationTest, PerFrameCrcProgressFarsDoNotReopenTheLastFrame) {
+	auto part = MakeThreeFramePart();
+	std::vector<uint32_t> idcode{0x1234}, wcfg{0x1}, mask{0xFFFFFFFF},
+	    ctl1{1u << 21}, crc{0xDEADBEEF};
+	std::vector<uint32_t> f0{0x4560}, f1{0x4561}, f2{0x4562};
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> p{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::MASK, mask),
+	    WritePacket(Series7::ConfRegType::CTL1, ctl1),
+	    WritePacket(Series7::ConfRegType::FAR, f0),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xC0})),
+	    WritePacket(Series7::ConfRegType::CRC, crc),
+	    WritePacket(Series7::ConfRegType::FAR, f1),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xC1})),
+	    WritePacket(Series7::ConfRegType::CRC, crc),
+	    WritePacket(Series7::ConfRegType::FAR, f2),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xC2})),
+	    WritePacket(Series7::ConfRegType::CRC, crc),
+	    WritePacket(Series7::ConfRegType::FAR, f2),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0x00})),
+	    WritePacket(Series7::ConfRegType::CRC, crc),
+	};
+	auto c = Configuration<Series7>::InitWithPackets(part, p);
+	ASSERT_TRUE(c);
+	ASSERT_EQ(c->frames().size(), 3u);
+	EXPECT_EQ(c->frames().at(0x4560)[0], 0xC0u);
+	EXPECT_EQ(c->frames().at(0x4561)[0], 0xC1u);
+	EXPECT_EQ(c->frames().at(0x4562)[0], 0xC2u);
+}
+
+TEST(ConfigurationTest, BareWcfgAfterTheEndRewritesTheLastFrame) {
+	auto part = MakeThreeFramePart();
+	std::vector<uint32_t> idcode{0x1234}, wcfg{0x1}, far{0x4562};
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> p{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FAR, far),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xD0, 0x00})),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xD1, 0x00})),
+	};
+	auto c = Configuration<Series7>::InitWithPackets(part, p);
+	ASSERT_TRUE(c);
+	EXPECT_EQ(c->frames().at(0x4562)[0], 0xD1u);
+}
+
+TEST(ConfigurationTest, MfwrAfterTheEndReplaysWhatFdriLastCarried) {
+	auto part = MakeThreeFramePart();
+	std::vector<uint32_t> idcode{0x1234}, wcfg{0x1}, far{0x4562},
+	    far0{0x4560}, mfw{0x2}, mfwr{0, 0, 0, 0};
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> p{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FAR, far),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xE2})),
+	    WritePacket(Series7::ConfRegType::FDRI, FrameRun({0xE9})),
+	    WritePacket(Series7::ConfRegType::CMD, mfw),
+	    WritePacket(Series7::ConfRegType::FAR, far0),
+	    WritePacket(Series7::ConfRegType::MFWR, mfwr),
+	};
+	auto c = Configuration<Series7>::InitWithPackets(part, p);
+	ASSERT_TRUE(c);
+	EXPECT_EQ(c->frames().at(0x4562)[0], 0xE2u);
+	EXPECT_EQ(c->frames().at(0x4560)[0], 0xE9u);
+}
+
+TEST(ConfigurationTest, BlockRamIsTheLastBlockTypeAndClbEndIsNotTheEnd) {
+	std::vector<xc7series::FrameAddress> a = {
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 0),
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, true, 0,
+	                            0, 0),
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, true, 1,
+	                            0, 0),
+	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 0,
+	                            0, 0),
+	    xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM, false, 1,
+	                            0, 0)};
+	auto part = absl::optional<xc7series::Part>(xc7series::Part(0x1234, a));
+	Frames<Series7> frames;
+	uint32_t fill = 0x10;
+	for (auto& addr : a)
+		frames.getFrames().emplace(addr,
+		                           std::vector<uint32_t>(101, fill++));
+	auto data = Configuration<Series7>::createType2ConfigurationPacketData(
+	    frames.getFrames(), part);
+	std::vector<uint32_t> idcode{0x1234}, wcfg{0x1}, far{0x0}, empty;
+	const auto& trailing = FrameRun({0x99, 0x98});
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> p{
+	    WritePacket(Series7::ConfRegType::IDCODE, idcode),
+	    WritePacket(Series7::ConfRegType::FAR, far),
+	    WritePacket(Series7::ConfRegType::CMD, wcfg),
+	    WritePacket(Series7::ConfRegType::FDRI, empty),
+	    WritePacket(Series7::ConfRegType::FDRI, data, 0x2),
+	    WritePacket(Series7::ConfRegType::FDRI, trailing),
+	};
+	auto c = Configuration<Series7>::InitWithPackets(*part, p);
+	ASSERT_TRUE(c);
+	ASSERT_EQ(c->frames().size(), 5u);
+	fill = 0x10;
+	for (auto& addr : a)
+		EXPECT_EQ(c->frames().at(addr)[0], fill++);
+}
+
+TEST(ConfigurationTest, PartialPackageEndingAtTheDeviceEndRoundTrips) {
+	std::vector<xc7series::FrameAddress> a = {
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 0),
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 1),
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 2),
+	    xc7series::FrameAddress(xc7series::BlockType::CLB_IO_CLK, false, 0,
+	                            0, 3)};
+	auto part = absl::optional<xc7series::Part>(xc7series::Part(0x1234, a));
+	Frames<Series7> f1, f2, flush;
+	f1.getFrames().emplace(a[2], std::vector<uint32_t>(101, 0x21));
+	f1.getFrames().emplace(a[3], std::vector<uint32_t>(101, 0x22));
+	f2.getFrames().emplace(a[0], std::vector<uint32_t>(101, 0x30));
+	flush.getFrames().emplace(a[1], std::vector<uint32_t>(101, 0x31));
+	auto b1 = Configuration<Series7>::createPartialPacketData(
+	    f1.getFrames(), flush.getFrames(), part, 2);
+	auto b2 = Configuration<Series7>::createPartialPacketData(
+	    f2.getFrames(), flush.getFrames(), part, 2);
+	Configuration<Series7>::PartialPacketData blocks = b1;
+	blocks.insert(blocks.end(), b2.begin(), b2.end());
+	blocks.insert(blocks.end(), b1.begin(), b1.end());
+	Series7::ConfigurationPackage pkg;
+	PartialStreamOptions opts;
+	Configuration<Series7>::createPartialConfigurationPackage(pkg, blocks,
+	                                                          part, opts);
+	std::vector<ConfigurationPacket<Series7::ConfRegType>> p;
+	for (auto& pk : pkg)
+		p.emplace_back(pk->header_type(), pk->opcode(), pk->address(),
+		               pk->data());
+	auto c = Configuration<Series7>::InitWithPackets(*part, p);
+	ASSERT_TRUE(c);
+	EXPECT_EQ(c->frames().at(a[3])[0], 0x22u);
+	EXPECT_EQ(c->frames().at(a[2])[0], 0x21u);
+	EXPECT_EQ(c->frames().at(a[0])[0], 0x30u);
+	EXPECT_EQ(c->frames().at(a[1])[0], 0x31u);
 }
