@@ -59,7 +59,9 @@ def families_in(db_root):
         if glob.glob(os.path.join(db_root, name, 'segbits_*.db')))
 
 
-def run(db_root, families=None, exceptions=frozenset(), out=sys.stdout):
+def run(db_root, families=None, exceptions=frozenset(), out=None):
+    if out is None:
+        out = sys.stdout
     families = families or families_in(db_root)
     by_file = {}
     for family in families:
@@ -97,7 +99,7 @@ def run(db_root, families=None, exceptions=frozenset(), out=sys.stdout):
         "%d frame-set violation(s), %d excused" %
         (files, pairs, len(violations), excused),
         file=out)
-    return len(violations)
+    return len(violations), pairs - excused - len(violations)
 
 
 def main():
@@ -105,7 +107,12 @@ def main():
         description="Fail when a feature present in two families' copies of "
         "the same segbits_<tile>.db uses a different set of frame indices in "
         "each. Polarity and word offsets are ignored; only the frames are "
-        "compared.")
+        "compared.",
+        epilog="Exit status: 0 when every compared tag-pair agrees and at "
+        "least --min-pairs of them agreed; 1 on any frame-set violation; 2 "
+        "when there is no verdict: a usage error, a missing --db-root, an "
+        "unreadable or malformed input file, or fewer than --min-pairs "
+        "agreeing tag-pairs.")
     parser.add_argument(
         '--db-root',
         required=True,
@@ -119,12 +126,34 @@ def main():
         '--exceptions',
         help="file of '<file> <tag> <family> <family> <reason>' lines that "
         'may disagree')
+    parser.add_argument(
+        '--min-pairs',
+        type=int,
+        default=1,
+        help='exit 2 instead of 0 when fewer shared tag-pairs than this '
+        'agreed; excused pairs do not count (default: %(default)s)')
     args = parser.parse_args()
+    if not os.path.isdir(args.db_root):
+        parser.error('--db-root %s is not a directory' % args.db_root)
+    if args.min_pairs < 0:
+        parser.error('--min-pairs must not be negative')
 
-    exceptions = read_exceptions(
-        args.exceptions) if args.exceptions else frozenset()
-    violations = run(args.db_root, args.family, exceptions)
-    sys.exit(1 if violations else 0)
+    try:
+        exceptions = read_exceptions(
+            args.exceptions) if args.exceptions else frozenset()
+        violations, agreed = run(args.db_root, args.family, exceptions)
+    except (OSError, ValueError, AssertionError) as e:
+        print("crossfam: no verdict, %s" % e, file=sys.stderr)
+        sys.exit(2)
+    if violations:
+        sys.exit(1)
+    if agreed < args.min_pairs:
+        print(
+            "crossfam: no verdict, %d shared tag-pair(s) agreed, "
+            "--min-pairs is %d" % (agreed, args.min_pairs),
+            file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
 
 
 if __name__ == '__main__':
