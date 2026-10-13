@@ -96,6 +96,28 @@ def feature_assignment(set_feature):
         set_feature.value & width_mask) << set_feature.start
 
 
+def set_feature_as_written(set_feature):
+    '''Render set_feature with its value zero-padded to the feature width,
+    the form FASM writers emit, rather than fasm's minimal-digit form.'''
+    text = fasm.set_feature_to_str(set_feature)
+    width = fasm.set_feature_width(set_feature)
+    value_format = set_feature.value_format
+    if value_format == fasm.ValueFormat.VERILOG_BINARY:
+        digits = '{:0{}b}'.format(set_feature.value, width)
+        radix = 'b'
+    elif value_format == fasm.ValueFormat.VERILOG_HEX:
+        digits = '{:0{}X}'.format(set_feature.value, (width + 3) // 4)
+        radix = 'h'
+    elif value_format == fasm.ValueFormat.VERILOG_OCTAL:
+        digits = '{:0{}o}'.format(set_feature.value, (width + 2) // 3)
+        radix = 'o'
+    else:
+        return text
+
+    return "{} = {}'{}{}".format(
+        text.rsplit(' = ', 1)[0], width, radix, digits)
+
+
 def init_frame_at_address(frames, addr):
     '''Set given frame to 0 if not initialized '''
     if not addr in frames:
@@ -339,28 +361,41 @@ class FasmAssembler(object):
                                bits.base_address + bits.frames):
                 self.frames_in_use.add(frame)
 
-    def record_feature_assignment(self, set_feature, line):
+    def record_feature_assignment(self, set_feature):
         mask, value = feature_assignment(set_feature)
         prior = self.feature_assignments.get(set_feature.feature)
         if prior is None:
-            self.feature_assignments[set_feature.feature] = [mask, value, line]
+            self.feature_assignments[set_feature.feature] = [
+                mask, value, [set_feature]
+            ]
             return
 
-        prior_mask, prior_value, prior_line = prior
+        prior_mask, prior_value, prior_set_features = prior
         conflict = (prior_value ^ value) & prior_mask & mask
         if conflict:
             addresses = [
                 address for address in range(conflict.bit_length())
                 if conflict & (1 << address)
             ]
+            earlier = []
+            for prior_set_feature in prior_set_features:
+                earlier_mask, earlier_value = feature_assignment(
+                    prior_set_feature)
+                if (earlier_value ^ value) & earlier_mask & mask:
+                    earlier.append(
+                        '"{}"'.format(
+                            set_feature_as_written(prior_set_feature)))
             raise FasmFeatureConflict(
-                'FASM line "{}" assigns {} a value that FASM line "{}" '
+                'FASM line "{}" assigns {} a value that FASM line {} '
                 'already assigned differently, at address(es) {}{}'.format(
-                    line, set_feature.feature, prior_line, ', '.join(
+                    set_feature_as_written(set_feature), set_feature.feature,
+                    ' and '.join(earlier), ', '.join(
                         str(a) for a in addresses[:8]),
                     ' and {} more'.format(len(addresses) - 8)
                     if len(addresses) > 8 else ''))
 
+        if (prior_mask | mask) != prior_mask:
+            prior_set_features.append(set_feature)
         prior[0] = prior_mask | mask
         prior[1] = prior_value | value
 
@@ -374,7 +409,7 @@ class FasmAssembler(object):
         assert len(line_strs) == 1
         line_str = line_strs[0]
 
-        self.record_feature_assignment(line.set_feature, line_str)
+        self.record_feature_assignment(line.set_feature)
 
         parts = line.set_feature.feature.split('.')
         tile = parts[0]

@@ -353,6 +353,31 @@ class TestTileWindow(unittest.TestCase):
                 fasm_assembler.check_bit_in_tile_window(
                     'T', bits, 'CLB_IO_CLK', bit, 'line')
 
+    def test_no_bit_is_written_before_a_later_bit_is_refused(self):
+        assembler = self.assembler()
+        tile = 'CLBLM_L_X10Y102'
+        gridinfo = assembler.grid.gridinfo_at_tilename(tile)
+        block_type = prjxray.grid_types.BlockType.CLB_IO_CLK
+        bits = gridinfo.bits[block_type]
+        inside = prjxray.tile_segbits.Bit(
+            word_column=bits.base_address,
+            word_bit=bits.offset * 32,
+            isset=True)
+        outside = prjxray.tile_segbits.Bit(
+            word_column=bits.base_address,
+            word_bit=(bits.offset + bits.words) * 32,
+            isset=True)
+        segbits = mock.Mock()
+        segbits.feature_to_bits.return_value = [(block_type, inside),
+                                                (block_type, outside)]
+        with mock.patch.object(assembler.grid, 'get_tile_segbits_at_tilename',
+                               return_value=segbits):
+            with self.assertRaises(fasm_assembler.FasmTileWindowViolation):
+                assembler.enable_feature(tile, 'SLICEM_X0.PAIR', 0, 'line')
+        self.assertEqual(assembler.frames, {})
+        self.assertEqual(assembler.frames_in_use, set())
+
+
 class TestFeatureConflict(unittest.TestCase):
     INIT = 'CLBLM_L_X10Y102.SLICEM_X0.ALUT.INIT'
 
@@ -405,6 +430,28 @@ class TestFeatureConflict(unittest.TestCase):
             self.INIT + "[3:0] = 4'b0101\n" + self.INIT + "[3:0] = 4'b1010")
         self.assertEqual(rc, 1)
         self.assertIsNone(size)
+
+    def test_message_quotes_both_lines_at_full_width(self):
+        with self.assertRaises(fasm_assembler.FasmFeatureConflict) as cm:
+            self.assemble(
+                self.INIT + "[7:0] = 8'b00000101\n" + self.INIT +
+                "[7:0] = 8'h0A\n")
+        message = str(cm.exception)
+        self.assertIn('"' + self.INIT + "[7:0] = 8'b00000101\"", message)
+        self.assertIn('"' + self.INIT + "[7:0] = 8'h0A\"", message)
+
+    def test_message_names_each_earlier_line_that_conflicts(self):
+        with self.assertRaises(fasm_assembler.FasmFeatureConflict) as cm:
+            self.assemble(
+                self.INIT + "[1:0] = 2'b01\n" + self.INIT +
+                "[3:2] = 2'b00\n" + self.INIT + "[5:4] = 2'b10\n" +
+                self.INIT + "[5:0] = 6'b000001\n")
+        message = str(cm.exception)
+        self.assertNotIn("[1:0] = 2'b01", message)
+        self.assertNotIn("[3:2] = 2'b00", message)
+        self.assertIn('"' + self.INIT + "[5:4] = 2'b10\"", message)
+        self.assertIn('address(es) 5', message)
+
 
 class TestRoiPrecedence(unittest.TestCase):
     def test_roi_violation_is_not_hidden_by_allowed_missing_features(self):
