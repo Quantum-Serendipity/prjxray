@@ -26,6 +26,7 @@ add_library(libprjxray
 	xilinx/xc7series/ecc.cc
 	xilinx/xc7series/prepass_geometry.cc
 )
+target_compile_options(libprjxray PUBLIC "-Wno-deprecated")
 target_include_directories(libprjxray PUBLIC "include")
 target_link_libraries(libprjxray absl::optional absl::variant absl::strings absl::span absl::time yaml-cpp)
 
