@@ -353,6 +353,59 @@ class TestTileWindow(unittest.TestCase):
                 fasm_assembler.check_bit_in_tile_window(
                     'T', bits, 'CLB_IO_CLK', bit, 'line')
 
+class TestFeatureConflict(unittest.TestCase):
+    INIT = 'CLBLM_L_X10Y102.SLICEM_X0.ALUT.INIT'
+
+    def assemble(self, fasm_text):
+        db = Database(
+            os.path.join(os.path.dirname(__file__), 'test_data', 'db'),
+            'xc7a200tffg1156-1')
+        assembler = fasm_assembler.FasmAssembler(db)
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write(fasm_text)
+            fin.flush()
+            assembler.parse_fasm_filename(fin.name)
+        return assembler
+
+    def test_two_inits_are_not_ored(self):
+        with self.assertRaises(fasm_assembler.FasmFeatureConflict):
+            self.assemble(
+                self.INIT + "[3:0] = 4'b0101\n" + self.INIT +
+                "[3:0] = 4'b1010\n")
+
+    def test_zero_then_one_is_a_conflict(self):
+        with self.assertRaises(fasm_assembler.FasmFeatureConflict):
+            self.assemble(
+                'CLBLM_L_X10Y102.SLICEM_X0.SRUSEDMUX = 0\n'
+                'CLBLM_L_X10Y102.SLICEM_X0.SRUSEDMUX\n')
+
+    def test_bit_and_range_overlap_is_a_conflict(self):
+        with self.assertRaises(fasm_assembler.FasmFeatureConflict):
+            self.assemble(
+                self.INIT + "[3:0] = 4'b0000\n" + self.INIT + '[2]\n')
+
+    def test_address_zero_and_bare_feature_are_one_address(self):
+        with self.assertRaises(fasm_assembler.FasmFeatureConflict):
+            self.assemble(self.INIT + '[0] = 0\n' + self.INIT + '\n')
+
+    def test_repeat_with_same_value_is_accepted(self):
+        self.assemble(
+            self.INIT + "[3:0] = 4'b0101\n" + self.INIT +
+            "[3:0] = 4'b0101\n")
+
+    def test_disjoint_ranges_are_accepted(self):
+        assembler = self.assemble(
+            self.INIT + "[1:0] = 2'b01\n" + self.INIT + "[3:2] = 2'b10\n")
+        self.assertEqual(
+            assembler.feature_assignments['CLBLM_L_X10Y102.SLICEM_X0.ALUT.INIT']
+            [:2], [0b1111, 0b1001])
+
+    def test_conflict_exits_nonzero(self):
+        rc, size = TestExitContract().run_main(
+            self.INIT + "[3:0] = 4'b0101\n" + self.INIT + "[3:0] = 4'b1010")
+        self.assertEqual(rc, 1)
+        self.assertIsNone(size)
+
 class TestRoiPrecedence(unittest.TestCase):
     def test_roi_violation_is_not_hidden_by_allowed_missing_features(self):
         db = Database(

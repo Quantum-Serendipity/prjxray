@@ -22,6 +22,12 @@ class FasmInconsistentBits(Exception):
     pass
 
 
+class FasmFeatureConflict(Exception):
+    """Raised when two FASM lines assign different values to the same
+    feature address."""
+    pass
+
+
 class FasmTileWindowViolation(Exception):
     """Raised when a feature resolves to a bit outside its own tile's frames
     or words, i.e. a bit that belongs to another tile."""
@@ -74,6 +80,22 @@ def check_bit_in_tile_window(tile, bits, block_type, bit, line):
             bits.offset, bits.offset + bits.words - 1))
 
 
+def feature_assignment(set_feature):
+    '''Return (mask, value) over the feature's addresses: mask has a bit for
+    every address the line assigns, value the bit assigned there.'''
+    if set_feature.start is None:
+        return 1, 1 if set_feature.value else 0
+
+    if set_feature.end is None:
+        return 1 << set_feature.start, (
+            1 << set_feature.start if set_feature.value else 0)
+
+    width = set_feature.end - set_feature.start + 1
+    width_mask = (1 << width) - 1
+    return width_mask << set_feature.start, (
+        set_feature.value & width_mask) << set_feature.start
+
+
 def init_frame_at_address(frames, addr):
     '''Set given frame to 0 if not initialized '''
     if not addr in frames:
@@ -90,6 +112,8 @@ class FasmAssembler(object):
 
         self.frames = {}
         self.frames_line = {}
+
+        self.feature_assignments = {}
 
         self.feature_callback = lambda feature: None
 
@@ -315,6 +339,31 @@ class FasmAssembler(object):
                                bits.base_address + bits.frames):
                 self.frames_in_use.add(frame)
 
+    def record_feature_assignment(self, set_feature, line):
+        mask, value = feature_assignment(set_feature)
+        prior = self.feature_assignments.get(set_feature.feature)
+        if prior is None:
+            self.feature_assignments[set_feature.feature] = [mask, value, line]
+            return
+
+        prior_mask, prior_value, prior_line = prior
+        conflict = (prior_value ^ value) & prior_mask & mask
+        if conflict:
+            addresses = [
+                address for address in range(conflict.bit_length())
+                if conflict & (1 << address)
+            ]
+            raise FasmFeatureConflict(
+                'FASM line "{}" assigns {} a value that FASM line "{}" '
+                'already assigned differently, at address(es) {}{}'.format(
+                    line, set_feature.feature, prior_line, ', '.join(
+                        str(a) for a in addresses[:8]),
+                    ' and {} more'.format(len(addresses) - 8)
+                    if len(addresses) > 8 else ''))
+
+        prior[0] = prior_mask | mask
+        prior[1] = prior_value | value
+
     def add_fasm_line(self, line, missing_features):
         if not line.set_feature:
             return
@@ -324,6 +373,8 @@ class FasmAssembler(object):
         line_strs = tuple(fasm.fasm_line_to_string(line))
         assert len(line_strs) == 1
         line_str = line_strs[0]
+
+        self.record_feature_assignment(line.set_feature, line_str)
 
         parts = line.set_feature.feature.split('.')
         tile = parts[0]

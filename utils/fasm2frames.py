@@ -683,7 +683,8 @@ def main():
             f_out.close()
     except (fasm_assembler.FasmRoiViolation, fasm_assembler.FasmLookupError,
             fasm_assembler.FasmInconsistentBits,
-            fasm_assembler.FasmTileWindowViolation, ValueError) as e:
+            fasm_assembler.FasmTileWindowViolation,
+            fasm_assembler.FasmFeatureConflict, ValueError) as e:
         discard_output()
         eprint('ERROR: %s' % e)
         return 1
