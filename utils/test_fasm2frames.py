@@ -20,6 +20,8 @@ import tempfile
 from unittest import mock
 
 import prjxray
+import prjxray.grid_types
+import prjxray.tile_segbits
 from prjxray import fasm_assembler
 from prjxray.db import Database
 from prjxray.roi import Roi
@@ -273,6 +275,83 @@ class TestExitContract(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIsNone(size)
 
+
+class TestTileWindow(unittest.TestCase):
+    SING_Y1 = 'LIOB33_SING_X0Y0.IOB_Y1.SOMETHING.IN'
+
+    def assembler(self):
+        db = Database(
+            os.path.join(os.path.dirname(__file__), 'test_data', 'db'),
+            'xc7a200tffg1156-1')
+        return fasm_assembler.FasmAssembler(db)
+
+    def test_absent_sing_site_is_refused(self):
+        assembler = self.assembler()
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write(self.SING_Y1 + '\n')
+            fin.flush()
+            with self.assertRaises(fasm_assembler.FasmTileWindowViolation):
+                assembler.parse_fasm_filename(fin.name)
+        self.assertEqual(assembler.frames, {})
+        self.assertEqual(assembler.frames_in_use, set())
+
+    def test_refusal_is_not_suppressed_by_allow_missing_features(self):
+        assembler = self.assembler()
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write(self.SING_Y1 + '\n')
+            fin.flush()
+            with mock.patch.dict(os.environ,
+                                 {'XRAY_ALLOW_MISSING_FEATURES': '1'}):
+                with self.assertRaises(
+                        fasm_assembler.FasmTileWindowViolation):
+                    assembler.parse_fasm_filename(fin.name)
+
+    def test_absent_sing_site_exits_nonzero(self):
+        rc, size = TestExitContract().run_main(self.SING_Y1)
+        self.assertEqual(rc, 1)
+        self.assertIsNone(size)
+
+    def test_word_past_the_tile(self):
+        bits = prjxray.grid_types.Bits(
+            base_address=0x00400000,
+            frames=42,
+            offset=99,
+            words=2,
+            alias=None)
+        for word, refused in ((98, True), (99, False), (100, False),
+                              (101, True)):
+            bit = prjxray.tile_segbits.Bit(
+                word_column=0x00400000 + 38,
+                word_bit=word * 32 + 3,
+                isset=True)
+            if refused:
+                with self.assertRaises(
+                        fasm_assembler.FasmTileWindowViolation):
+                    fasm_assembler.check_bit_in_tile_window(
+                        'T', bits, 'CLB_IO_CLK', bit, 'line')
+            else:
+                fasm_assembler.check_bit_in_tile_window(
+                    'T', bits, 'CLB_IO_CLK', bit, 'line')
+
+    def test_frame_past_the_tile(self):
+        bits = prjxray.grid_types.Bits(
+            base_address=0x00400000,
+            frames=42,
+            offset=0,
+            words=2,
+            alias=None)
+        for frame, refused in ((-1, True), (0, False), (41, False),
+                               (42, True)):
+            bit = prjxray.tile_segbits.Bit(
+                word_column=0x00400000 + frame, word_bit=3, isset=True)
+            if refused:
+                with self.assertRaises(
+                        fasm_assembler.FasmTileWindowViolation):
+                    fasm_assembler.check_bit_in_tile_window(
+                        'T', bits, 'CLB_IO_CLK', bit, 'line')
+            else:
+                fasm_assembler.check_bit_in_tile_window(
+                    'T', bits, 'CLB_IO_CLK', bit, 'line')
 
 class TestRoiPrecedence(unittest.TestCase):
     def test_roi_violation_is_not_hidden_by_allowed_missing_features(self):

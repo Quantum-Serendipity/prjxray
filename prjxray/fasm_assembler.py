@@ -22,6 +22,12 @@ class FasmInconsistentBits(Exception):
     pass
 
 
+class FasmTileWindowViolation(Exception):
+    """Raised when a feature resolves to a bit outside its own tile's frames
+    or words, i.e. a bit that belongs to another tile."""
+    pass
+
+
 class FasmRoiViolation(Exception):
     """Raised in strict-ROI mode when the emitted frame set would leave the ROI.
 
@@ -44,6 +50,28 @@ class FasmRoiViolation(Exception):
 # whole-device FASM against a small ROI produces thousands of them and an
 # unbounded list is not a diagnostic.
 _ROI_VIOLATION_REPORT_LIMIT = 20
+
+
+def check_bit_in_tile_window(tile, bits, block_type, bit, line):
+    '''Raise FasmTileWindowViolation unless bit lies in the tile's own frames
+    and words for block_type.'''
+    word = bit.word_bit // bitstream.WORD_SIZE_BITS
+    frame_ok = bits.base_address <= bit.word_column < (
+        bits.base_address + bits.frames)
+    word_ok = bits.offset <= word < bits.offset + bits.words
+    if frame_ok and word_ok:
+        return
+
+    raise FasmTileWindowViolation(
+        "FASM line '{}' resolves to frame 0x{:08X} word {} bit {}, outside "
+        "tile {}'s own {} window (frames 0x{:08X}..0x{:08X}, words {}..{}); "
+        "the bit would land in another tile's words or past the end of the "
+        "frame".format(
+            line, bit.word_column, word, bit.word_bit %
+            bitstream.WORD_SIZE_BITS, tile, block_type.value
+            if hasattr(block_type, 'value') else block_type,
+            bits.base_address, bits.base_address + bits.frames - 1,
+            bits.offset, bits.offset + bits.words - 1))
 
 
 def init_frame_at_address(frames, addr):
@@ -265,14 +293,20 @@ class FasmAssembler(object):
         any_bits = set()
 
         try:
-            for block_type, bit in segbits.feature_to_bits(gridinfo.bits, db_k,
-                                                           address):
-                any_bits.add(block_type)
-                update_segbit(bit)
+            feature_bits = list(
+                segbits.feature_to_bits(gridinfo.bits, db_k, address))
         except KeyError:
             raise FasmLookupError(
                 "Segment DB %s, key %s not found from line '%s'" %
                 (gridinfo.tile_type, db_k, line))
+
+        for block_type, bit in feature_bits:
+            check_bit_in_tile_window(tile, gridinfo.bits[block_type],
+                                     block_type, bit, line)
+
+        for block_type, bit in feature_bits:
+            any_bits.add(block_type)
+            update_segbit(bit)
 
         for block_type in any_bits:
             # Mark all frames used by this tile as in use.
