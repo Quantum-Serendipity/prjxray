@@ -1151,6 +1151,31 @@ TEST(ConfigurationTest, PrePassWithholdsWord50FromTheStaticToo) {
 	}
 }
 
+TEST(ConfigurationTest, PrePassRefusesAStaticWithoutTheFrame) {
+	auto pass2 = ClbFrames(0x0F0F0F0F, {2, 30});
+	auto partial_static = ClbFrames(0xF000000F, {2});
+	EXPECT_THROW(Configuration<Series7>::createPrePassFrames(
+	                 pass2, partial_static, true, TestGeometry(), nullptr),
+	             std::runtime_error);
+	EXPECT_NO_THROW(Configuration<Series7>::createPrePassFrames(
+	    pass2, partial_static, false, TestGeometry(), nullptr));
+
+	auto short_static = ClbFrames(0xF000000F, {2, 30});
+	short_static.begin()->second.resize(100);
+	EXPECT_THROW(Configuration<Series7>::createPrePassFrames(
+	                 pass2, short_static, true, TestGeometry(), nullptr),
+	             std::runtime_error);
+}
+
+TEST(ConfigurationTest, PrePassNeedsNoStaticForOtherBlockTypes) {
+	Frames<Series7>::Frames2Data pass2, no_static;
+	pass2.emplace(xc7series::FrameAddress(xc7series::BlockType::BLOCK_RAM,
+	                                      false, 0, 0, 0),
+	              std::vector<uint32_t>(101, 0x5));
+	EXPECT_NO_THROW(Configuration<Series7>::createPrePassFrames(
+	    pass2, no_static, true, TestGeometry(), nullptr));
+}
+
 // Not characterised anywhere but 7-series, so it must not be guessed.
 TEST(ConfigurationTest, PrePassRefusesOnOtherArchitectures) {
 	Frames<UltraScale>::Frames2Data frames, no_static;
