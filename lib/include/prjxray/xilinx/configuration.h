@@ -186,9 +186,7 @@ class Configuration {
 	// Part::GetNextFrameAddress: {address of the run's first frame, the
 	// run's words}. One FAR + FDRI block is emitted per entry, so the
 	// device's frame-address counter never steps over a frame the caller
-	// did not ask for, and no frame outside the input .frm can be written.
-	// That is a structural property of the shape, not a check bolted on
-	// afterwards -- there is no code path that could add a frame.
+	// did not ask for.
 	using PartialPacketData = std::vector<std::pair<uint32_t, PacketData>>;
 
 	// Splits `frames` into those runs and TERMINATES each run, so that
@@ -624,12 +622,8 @@ Configuration<ArchType>::createPartialPacketData(
 	// block-type boundary, so a run that spans one looks contiguous. It is
 	// not. Between two rows the hardware's frame-address counter passes
 	// through two dummy frames, which is why the full-bitstream writer
-	// inserts two zero frames there -- and a pad frame in a PARTIAL
-	// bitstream lands on live static logic. Splitting instead means each
-	// FDRI block stays inside one row of one block type, the counter never
-	// reaches a dummy position, and no pad frame is ever needed.
-	// (Caught by ConfigurationTest.PartialPacketDataSplitsAtRowBoundary,
-	// which failed on the first draft of this function.)
+	// inserts two zero frames there. Splitting means each FDRI block stays
+	// inside one row of one block type.
 	bool have_expected = false;
 	uint32_t expected = 0;
 	bool boundary = false;

@@ -58,4 +58,20 @@ run full-crc refuse "${full[@]}" --crc compute
 run full-db-root refuse "${full[@]}" --db_root "$tmp"
 run full-tilegrid refuse "${full[@]}" --tilegrid "$tmp/rowend.frm"
 
+"$X2B" --helpfull > "$tmp/help.txt" 2>&1
+for phrase in "are written, and nothing else" "flushed by nothing"; do
+	if tr -s ' \n' ' ' < "$tmp/help.txt" | grep -qF "$phrase"; then
+		echo "FAIL help: still says '$phrase'"
+		failures=$((failures + 1))
+	else
+		echo "ok   help: does not say '$phrase'"
+	fi
+done
+if tr -s ' \n' ' ' < "$tmp/help.txt" | grep -qF "plus one FLUSH FRAME"; then
+	echo "ok   help: names the flush frame"
+else
+	echo "FAIL help: --partial_bitstream does not name the flush frame"
+	failures=$((failures + 1))
+fi
+
 [[ $failures -eq 0 ]]

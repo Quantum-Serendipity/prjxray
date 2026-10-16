@@ -39,8 +39,12 @@ DEFINE_string(architecture,
 DEFINE_bool(partial_bitstream,
             false,
             "Generate a partial bitstream. The frame set is DERIVED FROM THE "
-            "INPUT: exactly the frames listed in --frm_file are written, and "
-            "nothing else. Use fasm2frames --sparse --roi <roi.json> "
+            "INPUT: the frames listed in --frm_file are written, plus one "
+            "FLUSH FRAME at the address after the last frame of every FAR "
+            "block that ends mid-row, carrying --static_frames' content "
+            "there. A flush frame is outside --frm_file and can be inside "
+            "another region; a footprint taken from the .frm alone misses "
+            "it. Use fasm2frames --sparse --roi <roi.json> "
             "--roi-strict to produce that .frm, and note that plain --roi is "
             "a union rather than a filter.");
 DEFINE_uint32(pad_frames,
@@ -489,10 +493,8 @@ struct Frames2BitWriter {
 		if (FLAGS_partial_bitstream) {
 			// DERIVE-FROM-INPUT.
 			//
-			// The frame set of a partial bitstream is the frame set
-			// of the .frm, exactly. There is no address range to
-			// declare and nothing to fill in, so there is no way to
-			// write a frame the caller did not ask for.
+			// There is no address range to declare and nothing to
+			// zero-fill.
 			//
 			// The design this replaces declared the region as two
 			// numeric address ranges and zero-filled every device
