@@ -41,6 +41,11 @@ if(PRJXRAY_BUILD_TESTING)
 		COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/xc7frames2bit_test.sh
 			$<TARGET_FILE:xc7frames2bit>
 			${PROJECT_SOURCE_DIR}/lib/test_data/configuration_test.yaml)
+	add_test(NAME xc7patch_test
+		COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/xc7patch_test.sh
+			$<TARGET_FILE:xc7frames2bit>
+			$<TARGET_FILE:xc7patch>
+			${PROJECT_SOURCE_DIR}/lib/test_data/configuration_test.yaml)
 endif()
 
 install(TARGETS xc7frames2bit xc7patch gen_part_base_yaml frame_address_decoder bittool segmatch bitread DESTINATION bin)

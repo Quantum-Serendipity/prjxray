@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: ISC
  */
 #include <iostream>
+#include <stdexcept>
+#include <type_traits>
 
 #include <gflags/gflags.h>
 #include <prjxray/memory_mapped_file.h>
@@ -101,6 +103,34 @@ struct BitstreamPatcher {
 			return 1;
 		}
 
+		using ConfRegType = typename ArchType::ConfRegType;
+		bool base_writes_crc = false;
+		absl::optional<uint32_t> base_cor1;
+		for (const auto& packet : *bitstream_reader) {
+			if (packet.opcode() != xilinx::ConfigurationPacket<
+			                           ConfRegType>::Opcode::Write)
+				continue;
+			if (packet.address() == ConfRegType::CRC)
+				base_writes_crc = true;
+			else if (packet.address() == ConfRegType::COR1 &&
+			         !packet.data().empty())
+				base_cor1 = packet.data()[0];
+		}
+		xilinx::FullStreamOptions options;
+		if (std::is_same<ArchType, xilinx::Series7>::value) {
+			options.emit_crc = base_writes_crc;
+			if (base_cor1 && *base_cor1 != 0)
+				options.cor1 = base_cor1;
+		} else if (base_writes_crc) {
+			std::cerr << FLAGS_bitstream_file
+			          << " writes the CRC register, and the stream "
+			             "CRC is characterised for Series7 only. "
+			             "Patching it would emit a CRC-disabled "
+			             "stream."
+			          << std::endl;
+			return 1;
+		}
+
 		// Copy the base frames to a mutable collection
 		std::map<typename ArchType::FrameAddress, std::vector<uint32_t>>
 		    frames;
@@ -129,14 +159,15 @@ struct BitstreamPatcher {
 
 		// Put together a configuration package
 		typename ArchType::ConfigurationPackage configuration_package;
-		// Defaults: xc7patch has always emitted a CRC-disabled stream
-		// with COR1 at each architecture's own literal, and this change
-		// does not move it. --emit_crc and --rbcrc are offered on
-		// xc7frames2bit, where the experiments that motivated them
-		// live.
-		xilinx::Configuration<ArchType>::createConfigurationPackage(
-		    configuration_package, configuration_packet_data, part,
-		    xilinx::FullStreamOptions());
+		try {
+			xilinx::Configuration<ArchType>::
+			    createConfigurationPackage(
+			        configuration_package,
+			        configuration_packet_data, part, options);
+		} catch (const std::runtime_error& e) {
+			std::cerr << e.what() << std::endl;
+			return 1;
+		}
 
 		// Write bitstream.
 		auto bitstream_writer =
@@ -146,6 +177,7 @@ struct BitstreamPatcher {
 		        "xc7patch", FLAGS_output_file)) {
 			std::cerr << "Failed to write bitstream" << std::endl
 			          << "Exitting" << std::endl;
+			return 1;
 		}
 		return 0;
 	}
