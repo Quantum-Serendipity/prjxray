@@ -490,6 +490,15 @@ def group_tags(lines, tag_groups, bit_groups):
     >>> res = group_tags({"A 1_2", "B 3_4", "C 1_2"}, tg, bg)
     >>> (res[0], sorted(list(res[1])))
     (2, ['A 01_02 !03_04', 'B !01_02 03_04', 'C 01_02'])
+
+    >>> tg = [{"A", "B", "Z"}]
+    >>> bg = [{(1, 2), (3, 4)}]
+    >>> res = group_tags(
+    ...     {"A 1_2", "B 3_4", "Z <0 candidates>", "U <0 candidates>",
+    ...      "K <const1> 5_6"}, tg, bg)
+    >>> (res[0], sorted(list(res[1])))
+    (3, ['A 01_02 !03_04', 'B !01_02 03_04', 'K <const1> 5_6', \
+'U <0 candidates>', 'Z !01_02 !03_04'])
     """
 
     changes = 0
@@ -505,25 +514,15 @@ def group_tags(lines, tag_groups, bit_groups):
         # Parse the line
         tag, bits, mode, _ = util.parse_db_line(line)
 
-        # An UNSOLVED line -- segmatch's `<const0>`, `<const1> <candidates...>`,
-        # `<N candidates>`, `always` -- has no bits for a tag group to add
-        # zeros to, and format_bits() below has no representation for the
-        # annotation, so passing one through here silently rewrites
-        #
-        #     CFG_CENTER_MID.DCIRESET.ENABLED <const1> 26_2165 26_2166 ...
-        # to
-        #     CFG_CENTER_MID.DCIRESET.ENABLED
-        #
-        # and every downstream consumer then sees a line that solved to nothing
-        # rather than a line that could not be solved and why.  That runs
-        # unconditionally, tag groups or not, so add_zero_bits() has never once
-        # observed a `<const1>`: its own `assert mode not in ("<const0>",
-        # "<const1>")` is unreachable, and --unresolved-out would emit bare tag
-        # names.  Pass these through untouched; the drop sites downstream
-        # decide what to do with them.
         if mode is not None:
-            new_lines.add(line)
-            continue
+            group_bits = next(
+                (
+                    bit_group
+                    for tag_group, bit_group in zip(tag_groups, bit_groups)
+                    if tag in tag_group), None)
+            if mode != "<0 candidates>" or not group_bits:
+                new_lines.add(line)
+                continue
 
         if not bits:
             bits = set()
