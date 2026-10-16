@@ -639,7 +639,11 @@ def main():
         help="Treat --roi as a FILTER rather than a union: a FASM feature "
         "naming a tile outside the ROI is a hard error (non-zero exit) "
         "identifying the feature and its tile, and the emitted frame set is "
-        "asserted to be exactly the ROI's. Requires --roi and --sparse. Use "
+        "asserted to be exactly the ROI's. An ROI that shares a "
+        "configuration frame with any tile outside it is also a hard error: "
+        "a frame spans a whole clock-region row of its column, and a sparse "
+        "write would zero those tiles' words. Requires --roi and --sparse. "
+        "Use "
         "this whenever the device model is the full device, where one stray "
         "feature pulls that tile's whole frame column into a 'partial' "
         "bitstream and writing it destroys the static logic there.")
