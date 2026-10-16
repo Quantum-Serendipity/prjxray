@@ -41,5 +41,7 @@ run rowend-pad2 accept "${partial[@]}" --pad_frames 2
 run rowend-pad1 accept "${partial[@]}" --pad_frames 1
 run rowend-pad0 refuse "${partial[@]}" --pad_frames 0
 run rowend-default-pad refuse "${partial[@]}"
+run rowend-pad3-noverify refuse "${partial[@]}" --pad_frames 3 --noverify
+run rowend-pad4-noverify refuse "${partial[@]}" --pad_frames 4 --noverify
 
 [[ $failures -eq 0 ]]

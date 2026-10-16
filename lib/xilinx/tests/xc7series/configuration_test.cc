@@ -547,6 +547,14 @@ TEST(ConfigurationTest, PartialPacketDataPadsOnlyAtRowEnds) {
 	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(padded, rowend,
 	                                                          statics, part, 0),
 	             std::runtime_error);
+
+	auto overpadded = Configuration<Series7>::createPartialPacketData(
+	    rowend, statics, part, 3);
+	ASSERT_EQ(overpadded.size(), 1u);
+	EXPECT_EQ(overpadded[0].second.size(), 11u * 101);
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(
+	                 overpadded, rowend, statics, part, 3),
+	             std::runtime_error);
 }
 
 // The check must discriminate, not merely pass: a block whose length claims

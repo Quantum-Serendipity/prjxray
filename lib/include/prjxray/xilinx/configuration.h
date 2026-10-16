@@ -804,6 +804,25 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 				    << pad_frames << ".";
 				throw std::runtime_error(err.str());
 			}
+			if (trailing > 2) {
+				std::ostringstream err;
+				err << "A partial-bitstream block ends at 0x"
+				    << std::hex << std::setw(8)
+				    << std::setfill('0') << last << std::dec
+				    << ", the last frame of its row and block "
+				       "type, and carries "
+				    << trailing
+				    << " pad frames. The device's "
+				       "frame-address "
+				       "counter has two dummy positions there; "
+				       "a "
+				       "pad past them lands on the first "
+				       "frames "
+				       "of the next row. --pad_frames is at "
+				       "most "
+				       "2.";
+				throw std::runtime_error(err.str());
+			}
 			if (trailing == 0) {
 				std::ostringstream err;
 				err << "A partial-bitstream block ends at 0x"

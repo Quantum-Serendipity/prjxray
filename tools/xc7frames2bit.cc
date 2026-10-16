@@ -1016,6 +1016,14 @@ int main(int argc, char* argv[]) {
 		          << std::endl;
 		return 1;
 	}
+	if (FLAGS_pad_frames > 2) {
+		std::cerr << "--pad_frames is " << FLAGS_pad_frames
+		          << ". A row end has two dummy frame positions, and a "
+		             "third pad frame lands on the first frame of the "
+		             "next row. It is at most 2."
+		          << std::endl;
+		return 1;
+	}
 	if (FLAGS_compress && FLAGS_partial_bitstream) {
 		std::cerr << "--compress is the FULL bitstream switch. The "
 		             "partial path emits one FAR block per run of "
