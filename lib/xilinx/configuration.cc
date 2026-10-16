@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: ISC
  */
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -399,10 +400,31 @@ Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
 		++rep.clb_frames;
 
 		const auto it = static_frames.find(address);
+		if (have_static &&
+		    (it == static_frames.end() ||
+		     it->second.size() != Series7::words_per_frame)) {
+			std::ostringstream err;
+			err << "The pre-pass needs the static's own frame at 0x"
+			    << std::hex << std::setw(8) << std::setfill('0')
+			    << static_cast<uint32_t>(address) << std::dec
+			    << " for its STATIC term, and the static frame "
+			       "set ";
+			if (it == static_frames.end())
+				err << "has no frame there";
+			else
+				err << "carries " << it->second.size()
+				    << " words there, expected "
+				    << Series7::words_per_frame;
+			err << ". Pass 1 would drop the static's own routing "
+			       "in "
+			       "that frame. Give --static_frames every "
+			       "CLB_IO_CLK frame the partial writes, or use "
+			       "--prepass nostatic to accept an empty STATIC "
+			       "term knowingly.";
+			throw std::runtime_error(err.str());
+		}
 		const std::vector<uint32_t>& stat =
-		    (have_static && it != static_frames.end()) ? it->second
-		                                              : kZeroFrame;
-		const bool stat_ok = stat.size() == Series7::words_per_frame;
+		    have_static ? it->second : kZeroFrame;
 
 		const auto& masks = geometry.MasksFor(address);
 		if (!masks.column_in_tilegrid)
@@ -429,7 +451,7 @@ Frames<Series7>::Frames2Data Configuration<Series7>::createPrePassFrames(
 				continue;  // out[w] is already 0
 			const uint32_t site = masks.site[w];
 			const uint32_t park = ParkMask(minor, w);
-			const uint32_t s = stat_ok ? stat[w] : 0;
+			const uint32_t s = stat[w];
 			out[w] = (words[w] & site) | park |
 			         (s & ~site & ~park);
 			rep.withheld_bits += static_cast<uint64_t>(

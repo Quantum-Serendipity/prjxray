@@ -10,9 +10,11 @@
 #ifndef PRJXRAY_LIB_XILINX_FRAMES_H
 #define PRJXRAY_LIB_XILINX_FRAMES_H
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -96,49 +98,66 @@ int Frames<ArchType>::readFrames(const std::string& frm_file_str) {
 		return 1;
 	}
 	std::string frm_line;
+	size_t line_number = 0;
 
 	while (std::getline(frm_file, frm_line)) {
+		++line_number;
 		if (frm_line[0] == '#')
 			continue;
 
 		std::pair<std::string, std::string> frame_delta =
 		    absl::StrSplit(frm_line, ' ');
 
-		uint32_t frame_address =
-		    std::stoul(frame_delta.first, nullptr, 16);
-
+		uint32_t frame_address;
 		std::vector<std::string> frame_data_strings =
 		    absl::StrSplit(frame_delta.second, ',');
+		FrameData frame_data(frame_data_strings.size(), 0);
+		try {
+			frame_address =
+			    std::stoul(frame_delta.first, nullptr, 16);
+			std::transform(
+			    frame_data_strings.begin(),
+			    frame_data_strings.end(), frame_data.begin(),
+			    [](const std::string& val) -> uint32_t {
+				    return std::stoul(val, nullptr, 16);
+			    });
+		} catch (const std::logic_error&) {
+			std::cerr << frm_file_str << ":" << line_number
+			          << ": not a frame line of the form "
+			             "<frame_address> <word1>,...,<wordN>"
+			          << std::endl;
+			return 1;
+		}
 
-		// Spartan6's IOB frames can have different word count
 		if (!std::is_same<ArchType, Spartan6>::value) {
 			if (frame_data_strings.size() !=
 			    ArchType::words_per_frame) {
 				std::cerr
-				    << "Frame " << std::hex << frame_address
-				    << ": found " << std::dec
+				    << frm_file_str << ":" << line_number
+				    << ": frame 0x" << std::hex << frame_address
+				    << " has " << std::dec
 				    << frame_data_strings.size()
 				    << " words instead of "
 				    << ArchType::words_per_frame << std::endl;
-				continue;
+				return 1;
 			}
 		}
-
-		FrameData frame_data(frame_data_strings.size(), 0);
-		std::transform(frame_data_strings.begin(),
-		               frame_data_strings.end(), frame_data.begin(),
-		               [](const std::string& val) -> uint32_t {
-			               return std::stoul(val, nullptr, 16);
-		               });
 
 		typename ArchType::FrameAddress frm_addr(frame_address);
 		updateECC(frm_addr, frame_data);
 
-		// Insert the frame address and corresponding frame data to the
-		// map
-		frames_data_.insert(
-		    std::pair<typename ArchType::FrameAddress, FrameData>(
-		        frm_addr, frame_data));
+		if (!frames_data_
+		         .insert(std::pair<typename ArchType::FrameAddress,
+		                           FrameData>(frm_addr, frame_data))
+		         .second) {
+			std::cerr << frm_file_str << ":" << line_number
+			          << ": frame 0x" << std::hex << frame_address
+			          << std::dec
+			          << " appears a second time; the file must "
+			             "name each frame address once"
+			          << std::endl;
+			return 1;
+		}
 	}
 	return 0;
 }

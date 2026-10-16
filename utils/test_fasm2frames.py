@@ -458,25 +458,48 @@ class TestRoiPrecedence(unittest.TestCase):
         db = Database(
             os.path.join(os.path.dirname(__file__), 'test_data', 'db'),
             'xc7a200tffg1156-1')
-        loc = db.grid().loc_of_tilename('CLBLM_L_X10Y102')
         assembler = fasm_assembler.FasmAssembler(db)
         assembler.mark_roi_frames(
-            Roi(db=db,
-                x1=loc.grid_x,
-                x2=loc.grid_x,
-                y1=loc.grid_y,
-                y2=loc.grid_y),
-            strict=True)
+            Roi(db=db, x1=0, x2=1, y1=130, y2=155), strict=True)
 
         with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
             fin.write(
-                'CLBLM_L_X10Y102.SLICEM_X0.NO_SUCH_FEATURE\n'
+                'LIOB33_X0Y1.IOB_Y0.NO_SUCH_FEATURE\n'
                 'INT_L_X10Y102.BYP_ALT0.EE2END0\n')
             fin.flush()
             with mock.patch.dict(os.environ,
                                  {'XRAY_ALLOW_MISSING_FEATURES': '1'}):
                 with self.assertRaises(fasm_assembler.FasmRoiViolation):
                     assembler.parse_fasm_filename(fin.name)
+
+
+class TestRoiStrictSharedFrames(unittest.TestCase):
+    def assembler(self):
+        db = Database(
+            os.path.join(os.path.dirname(__file__), 'test_data', 'db'),
+            'xc7a200tffg1156-1')
+        return db, fasm_assembler.FasmAssembler(db)
+
+    def test_roi_sharing_frames_with_an_outside_tile_is_refused(self):
+        db, assembler = self.assembler()
+        roi = Roi(db=db, x1=30, x2=30, y1=49, y2=49)
+        with self.assertRaises(fasm_assembler.FasmRoiViolation) as cm:
+            assembler.mark_roi_frames(roi, strict=True)
+        self.assertIn('INT_L_X10Y102', str(cm.exception))
+        self.assertIn('HCLK_L_X31Y130', str(cm.exception))
+
+    def test_roi_owning_its_frames_is_accepted(self):
+        db, assembler = self.assembler()
+        roi = Roi(db=db, x1=30, x2=31, y1=26, y2=49)
+        assembler.mark_roi_frames(roi, strict=True)
+        frames = assembler.get_frames(sparse=True)
+        self.assertEqual(len(frames), 36)
+
+    def test_permissive_roi_is_unchanged(self):
+        db, assembler = self.assembler()
+        roi = Roi(db=db, x1=30, x2=30, y1=49, y2=49)
+        assembler.mark_roi_frames(roi)
+        self.assertEqual(len(assembler.get_frames(sparse=True)), 36)
 
 
 if __name__ == '__main__':

@@ -186,9 +186,7 @@ class Configuration {
 	// Part::GetNextFrameAddress: {address of the run's first frame, the
 	// run's words}. One FAR + FDRI block is emitted per entry, so the
 	// device's frame-address counter never steps over a frame the caller
-	// did not ask for, and no frame outside the input .frm can be written.
-	// That is a structural property of the shape, not a check bolted on
-	// afterwards -- there is no code path that could add a frame.
+	// did not ask for.
 	using PartialPacketData = std::vector<std::pair<uint32_t, PacketData>>;
 
 	// Splits `frames` into those runs and TERMINATES each run, so that
@@ -624,12 +622,8 @@ Configuration<ArchType>::createPartialPacketData(
 	// block-type boundary, so a run that spans one looks contiguous. It is
 	// not. Between two rows the hardware's frame-address counter passes
 	// through two dummy frames, which is why the full-bitstream writer
-	// inserts two zero frames there -- and a pad frame in a PARTIAL
-	// bitstream lands on live static logic. Splitting instead means each
-	// FDRI block stays inside one row of one block type, the counter never
-	// reaches a dummy position, and no pad frame is ever needed.
-	// (Caught by ConfigurationTest.PartialPacketDataSplitsAtRowBoundary,
-	// which failed on the first draft of this function.)
+	// inserts two zero frames there. Splitting means each FDRI block stays
+	// inside one row of one block type.
 	bool have_expected = false;
 	uint32_t expected = 0;
 	bool boundary = false;
@@ -750,6 +744,7 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 		    typename ArchType::FrameAddress(block.first));
 		size_t i = 0;
 		bool at_end = false;
+		uint32_t last = block.first;
 		// The leading run: frames the INPUT asked for. The first
 		// address the input does not name ends it, and everything
 		// from there is termination rather than payload.
@@ -763,6 +758,7 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 			if (!landed.insert(static_cast<uint32_t>(*address))
 			         .second)
 				++duplicated;
+			last = static_cast<uint32_t>(*address);
 			++i;
 			auto next = part->GetNextFrameAddress(*address);
 			at_end = !next ||
@@ -791,12 +787,7 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 			// device's dummy frame positions, so it lands nowhere
 			// -- but there must be exactly as much of it as was
 			// asked for, or the block and the padding rule
-			// disagree. One pad is also what flushes the last real
-			// frame out of the device's one-frame hold, so
-			// --pad_frames 0 leaves such a block unterminated; that
-			// is reported by the caller, not refused here, because
-			// this arm is also how a row-end block is emitted for
-			// the pad-geometry benches.
+			// disagree.
 			if (trailing != pad_frames) {
 				std::ostringstream err;
 				err << "A partial-bitstream block reaches the "
@@ -805,6 +796,40 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 				    << " frame(s) of payload left but "
 				       "--pad_frames is "
 				    << pad_frames << ".";
+				throw std::runtime_error(err.str());
+			}
+			if (trailing > 2) {
+				std::ostringstream err;
+				err << "A partial-bitstream block ends at 0x"
+				    << std::hex << std::setw(8)
+				    << std::setfill('0') << last << std::dec
+				    << ", the last frame of its row and block "
+				       "type, and carries "
+				    << trailing
+				    << " pad frames. The device's "
+				       "frame-address "
+				       "counter has two dummy positions there; "
+				       "a "
+				       "pad past them lands on the first "
+				       "frames "
+				       "of the next row. --pad_frames is at "
+				       "most "
+				       "2.";
+				throw std::runtime_error(err.str());
+			}
+			if (trailing == 0) {
+				std::ostringstream err;
+				err << "A partial-bitstream block ends at 0x"
+				    << std::hex << std::setw(8)
+				    << std::setfill('0') << last << std::dec
+				    << ", the last frame of its row and block "
+				       "type, and carries no pad frame. The "
+				       "device commits N-1 of the N frames in "
+				       "an "
+				       "FDRI burst, so that frame would never "
+				       "be "
+				       "written. Pass --pad_frames 2, which is "
+				       "what Vivado writes at a row end.";
 				throw std::runtime_error(err.str());
 			}
 			continue;

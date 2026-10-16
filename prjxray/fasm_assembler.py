@@ -481,9 +481,35 @@ class FasmAssembler(object):
                 bits = gridinfo.bits[block_type]
                 for frame in range(bits.base_address,
                                    bits.base_address + bits.frames):
-                    self.frames_in_use.add(frame)
                     roi_frames.add(frame)
 
+        if strict:
+            sharing = []
+            for tile in sorted(self.grid.tiles()):
+                if roi.tile_in_roi(self.grid.loc_of_tilename(tile)):
+                    continue
+                gridinfo = self.grid.gridinfo_at_tilename(tile)
+                if any(frame in roi_frames
+                       for bits in gridinfo.bits.values()
+                       for frame in range(
+                           bits.base_address, bits.base_address +
+                           bits.frames)):
+                    sharing.append(
+                        '{} (type {})'.format(tile, gridinfo.tile_type))
+            if sharing:
+                raise FasmRoiViolation(
+                    '--roi-strict ROI (GRID_X {}..{}, GRID_Y {}..{}) shares '
+                    'configuration frames with {} tile(s) outside it, whose '
+                    'words in those frames a sparse write would zero: {}{}. '
+                    'A frame spans a whole clock-region row of its column; '
+                    'widen the ROI to whole rows of the columns it '
+                    'touches.'.format(
+                        roi.x1, roi.x2, roi.y1, roi.y2, len(sharing),
+                        ', '.join(sharing[:_ROI_VIOLATION_REPORT_LIMIT]),
+                        ', ...' if
+                        len(sharing) > _ROI_VIOLATION_REPORT_LIMIT else ''))
+
+        self.frames_in_use |= roi_frames
         if strict:
             self.roi = roi
             self.roi_frames = frozenset(roi_frames)

@@ -14,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <gflags/gflags.h>
@@ -38,8 +39,12 @@ DEFINE_string(architecture,
 DEFINE_bool(partial_bitstream,
             false,
             "Generate a partial bitstream. The frame set is DERIVED FROM THE "
-            "INPUT: exactly the frames listed in --frm_file are written, and "
-            "nothing else. Use fasm2frames --sparse --roi <roi.json> "
+            "INPUT: the frames listed in --frm_file are written, plus one "
+            "FLUSH FRAME at the address after the last frame of every FAR "
+            "block that ends mid-row, carrying --static_frames' content "
+            "there. A flush frame is outside --frm_file and can be inside "
+            "another region; a footprint taken from the .frm alone misses "
+            "it. Use fasm2frames --sparse --roi <roi.json> "
             "--roi-strict to produce that .frm, and note that plain --roi is "
             "a union rather than a filter.");
 DEFINE_uint32(pad_frames,
@@ -57,8 +62,10 @@ DEFINE_uint32(pad_frames,
               "OUTSIDE the pblock -- an earlier version of this text read that "
               "frame as region content and concluded 'no pad', which is how a "
               "stream that never commits its own last frame passed every "
-              "check this tool had. 2 reproduces Vivado's pad slots; 0 is the "
-              "default and leaves a row-end block flushed by nothing.");
+              "check this tool had. 2 reproduces Vivado's pad slots. 0, the "
+              "default, suits only a partial with no row-end block: a "
+              "row-end block with no pad never commits its last frame, and "
+              "is refused.");
 DEFINE_uint32(expected_frames,
               0,
               "If non-zero, fail unless the partial bitstream writes exactly "
@@ -486,10 +493,8 @@ struct Frames2BitWriter {
 		if (FLAGS_partial_bitstream) {
 			// DERIVE-FROM-INPUT.
 			//
-			// The frame set of a partial bitstream is the frame set
-			// of the .frm, exactly. There is no address range to
-			// declare and nothing to fill in, so there is no way to
-			// write a frame the caller did not ask for.
+			// There is no address range to declare and nothing to
+			// zero-fill.
 			//
 			// The design this replaces declared the region as two
 			// numeric address ranges and zero-filled every device
@@ -1013,6 +1018,30 @@ int main(int argc, char* argv[]) {
 		             "and the flag would do nothing."
 		          << std::endl;
 		return 1;
+	}
+	if (!FLAGS_partial_bitstream) {
+		std::vector<std::string> ignored;
+		for (const char* name :
+		     {"raw", "expected_frames", "static_frames", "prepass",
+		      "pad_frames", "trailing_nops", "crc", "db_root",
+		      "tilegrid"}) {
+			if (!gflags::GetCommandLineFlagInfoOrDie(name)
+			         .is_default)
+				ignored.push_back(std::string("--") + name);
+		}
+		if (!ignored.empty()) {
+			std::cerr
+			    << "Without --partial_bitstream this writes a "
+			       "FULL bitstream, which does not read";
+			for (const std::string& f : ignored)
+				std::cerr << " " << f;
+			std::cerr << ". Those flags steer the partial path "
+			             "only; a full bitstream zero-fills every "
+			             "frame the .frm leaves out. Pass "
+			             "--partial_bitstream, or drop them."
+			          << std::endl;
+			return 1;
+		}
 	}
 	if (FLAGS_compress && FLAGS_partial_bitstream) {
 		std::cerr << "--compress is the FULL bitstream switch. The "

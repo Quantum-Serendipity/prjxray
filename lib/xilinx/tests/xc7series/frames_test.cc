@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -151,4 +153,72 @@ TEST(FramesTest, FindFramesNotInPart) {
 	frames.getFrames().erase(past_column_end);
 	frames.getFrames().erase(missing_row);
 	EXPECT_TRUE(frames.findFramesNotInPart(test_part).empty());
+}
+
+namespace {
+
+std::string FrameLine(uint32_t address, int words, uint32_t fill) {
+	std::ostringstream line;
+	line << "0x" << std::hex << address;
+	for (int w = 0; w < words; ++w)
+		line << (w ? "," : " ") << "0x" << fill;
+	return line.str();
+}
+
+int ReadFrameLines(const std::vector<std::string>& lines,
+                   Frames<Series7>* frames) {
+	char path[] = "/tmp/prjxray_frames_read_XXXXXX";
+	int fd = mkstemp(path);
+	EXPECT_NE(fd, -1);
+	{
+		std::ofstream f(path);
+		for (const std::string& line : lines)
+			f << line << "\n";
+	}
+	close(fd);
+	int rc = frames->readFrames(path);
+	std::remove(path);
+	return rc;
+}
+
+}  // namespace
+
+TEST(FramesTest, ReadFramesAcceptsWellFormedLines) {
+	Frames<Series7> frames;
+	EXPECT_EQ(ReadFrameLines({"# comment", FrameLine(0x100, 101, 0x11),
+	                          FrameLine(0x101, 101, 0x22)},
+	                         &frames),
+	          0);
+	EXPECT_EQ(frames.getFrames().size(), 2u);
+}
+
+TEST(FramesTest, ReadFramesRefusesAWrongWordCount) {
+	Frames<Series7> frames;
+	EXPECT_NE(ReadFrameLines(
+	              {FrameLine(0x100, 101, 0x11), FrameLine(0x101, 100, 0x22),
+	               FrameLine(0x102, 101, 0x33)},
+	              &frames),
+	          0);
+}
+
+TEST(FramesTest, ReadFramesRefusesADuplicateAddress) {
+	Frames<Series7> frames;
+	EXPECT_NE(ReadFrameLines(
+	              {FrameLine(0x100, 101, 0x11), FrameLine(0x101, 101, 0x22),
+	               FrameLine(0x101, 101, 0x99)},
+	              &frames),
+	          0);
+}
+
+TEST(FramesTest, ReadFramesRefusesAnUnparsableLine) {
+	Frames<Series7> frames;
+	int rc = -1;
+	EXPECT_NO_THROW(
+	    rc = ReadFrameLines({FrameLine(0x100, 101, 0x11), ""}, &frames));
+	EXPECT_NE(rc, 0);
+	Frames<Series7> words;
+	rc = -1;
+	EXPECT_NO_THROW(rc = ReadFrameLines(
+	                    {"0x100 0x1,zz," + std::string("0x0")}, &words));
+	EXPECT_NE(rc, 0);
 }
