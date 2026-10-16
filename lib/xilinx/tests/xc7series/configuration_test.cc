@@ -449,8 +449,6 @@ TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 	          Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, 0));
 	EXPECT_EQ(blocks[2].second.size(), 5u * 101);
 
-	// Total words == the input's frames plus the TWO flush frames and the
-	// row-end block's two pads. Nothing else was invented.
 	size_t words = 0;
 	for (auto& b : blocks)
 		words += b.second.size();

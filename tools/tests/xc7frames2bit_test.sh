@@ -21,6 +21,7 @@ frm() {
 run() {
 	local name=$1 want=$2 rc
 	shift 2
+	rm -f "$tmp/out.bit"
 	"$X2B" --part_file "$PART" --output_file "$tmp/out.bit" "$@" \
 		> "$tmp/$name.log" 2>&1
 	rc=$?
@@ -43,6 +44,23 @@ run rowend-pad0 refuse "${partial[@]}" --pad_frames 0
 run rowend-default-pad refuse "${partial[@]}"
 run rowend-pad3-noverify refuse "${partial[@]}" --pad_frames 3 --noverify
 run rowend-pad4-noverify refuse "${partial[@]}" --pad_frames 4 --noverify
+
+frm "$tmp/midrow.frm" 0x15a0 0x15a1
+frm "$tmp/midrow-static.frm" 0x15a0 0x15a1 0x15a2
+midrow=(--partial_bitstream --raw --prepass off --frm_file "$tmp/midrow.frm"
+	--static_frames "$tmp/midrow-static.frm")
+for p in 0 2 7; do
+	run midrow-pad$p accept "${midrow[@]}" --pad_frames $p
+	cp "$tmp/out.bit" "$tmp/midrow-pad$p.bit" 2>/dev/null
+done
+for p in 2 7; do
+	if cmp -s "$tmp/midrow-pad0.bit" "$tmp/midrow-pad$p.bit"; then
+		echo "ok   midrow-pad$p: same bytes as pad 0"
+	else
+		echo "FAIL midrow-pad$p: differs from pad 0 on a block with no row end"
+		failures=$((failures + 1))
+	fi
+done
 
 full=(--frm_file "$tmp/rowend.frm")
 run full accept "${full[@]}"
