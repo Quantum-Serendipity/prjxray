@@ -57,8 +57,10 @@ DEFINE_uint32(pad_frames,
               "OUTSIDE the pblock -- an earlier version of this text read that "
               "frame as region content and concluded 'no pad', which is how a "
               "stream that never commits its own last frame passed every "
-              "check this tool had. 2 reproduces Vivado's pad slots; 0 is the "
-              "default and leaves a row-end block flushed by nothing.");
+              "check this tool had. 2 reproduces Vivado's pad slots. 0, the "
+              "default, suits only a partial with no row-end block: a "
+              "row-end block with no pad never commits its last frame, and "
+              "is refused.");
 DEFINE_uint32(expected_frames,
               0,
               "If non-zero, fail unless the partial bitstream writes exactly "

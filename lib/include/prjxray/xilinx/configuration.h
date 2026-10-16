@@ -750,6 +750,7 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 		    typename ArchType::FrameAddress(block.first));
 		size_t i = 0;
 		bool at_end = false;
+		uint32_t last = block.first;
 		// The leading run: frames the INPUT asked for. The first
 		// address the input does not name ends it, and everything
 		// from there is termination rather than payload.
@@ -763,6 +764,7 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 			if (!landed.insert(static_cast<uint32_t>(*address))
 			         .second)
 				++duplicated;
+			last = static_cast<uint32_t>(*address);
 			++i;
 			auto next = part->GetNextFrameAddress(*address);
 			at_end = !next ||
@@ -791,12 +793,7 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 			// device's dummy frame positions, so it lands nowhere
 			// -- but there must be exactly as much of it as was
 			// asked for, or the block and the padding rule
-			// disagree. One pad is also what flushes the last real
-			// frame out of the device's one-frame hold, so
-			// --pad_frames 0 leaves such a block unterminated; that
-			// is reported by the caller, not refused here, because
-			// this arm is also how a row-end block is emitted for
-			// the pad-geometry benches.
+			// disagree.
 			if (trailing != pad_frames) {
 				std::ostringstream err;
 				err << "A partial-bitstream block reaches the "
@@ -805,6 +802,21 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 				    << " frame(s) of payload left but "
 				       "--pad_frames is "
 				    << pad_frames << ".";
+				throw std::runtime_error(err.str());
+			}
+			if (trailing == 0) {
+				std::ostringstream err;
+				err << "A partial-bitstream block ends at 0x"
+				    << std::hex << std::setw(8)
+				    << std::setfill('0') << last << std::dec
+				    << ", the last frame of its row and block "
+				       "type, and carries no pad frame. The "
+				       "device commits N-1 of the N frames in "
+				       "an "
+				       "FDRI burst, so that frame would never "
+				       "be "
+				       "written. Pass --pad_frames 2, which is "
+				       "what Vivado writes at a row end.";
 				throw std::runtime_error(err.str());
 			}
 			continue;

@@ -423,7 +423,7 @@ TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 		         Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, m), 0xEE);
 
 	auto blocks = Configuration<Series7>::createPartialPacketData(
-	    frames, statics, part, /*pad_frames=*/0);
+	    frames, statics, part, /*pad_frames=*/2);
 
 	// Three runs: [clb r0 c0 m2..3], [clb r0 c1 m2..3], [bram r0 c0 m0..3].
 	//
@@ -444,17 +444,17 @@ TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 	EXPECT_EQ(blocks[0].second.size(), 3u * 101);
 	EXPECT_EQ(blocks[1].first,
 	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 2));
-	EXPECT_EQ(blocks[1].second.size(), 2u * 101);
+	EXPECT_EQ(blocks[1].second.size(), 4u * 101);
 	EXPECT_EQ(blocks[2].first,
 	          Addr(xc7series::BlockType::BLOCK_RAM, 0, 0, 0));
 	EXPECT_EQ(blocks[2].second.size(), 5u * 101);
 
-	// Total words == the input's frames plus the TWO flush frames. Nothing
-	// else was invented.
+	// Total words == the input's frames plus the TWO flush frames and the
+	// row-end block's two pads. Nothing else was invented.
 	size_t words = 0;
 	for (auto& b : blocks)
 		words += b.second.size();
-	EXPECT_EQ(words, (frames.size() + 2) * 101);
+	EXPECT_EQ(words, (frames.size() + 2 + 2) * 101);
 
 	// And the payloads are the caller's, in order.
 	EXPECT_EQ(blocks[0].second.front(), 0xAAu);
@@ -462,8 +462,8 @@ TEST(ConfigurationTest, PartialPacketDataDerivesFromInput) {
 	EXPECT_EQ(blocks[1].second.front(), 0xCCu);
 
 	// The frame-set check agrees, walking forward from each FAR.
-	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
-	                                                       statics, part, 0),
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(
+	              blocks, frames, statics, part, 2),
 	          frames.size());
 }
 
@@ -481,14 +481,14 @@ TEST(ConfigurationTest, PartialPacketDataSplitsAtRowBoundary) {
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 1, 0, m), 0x22);
 
 	auto blocks = Configuration<Series7>::createPartialPacketData(
-	    frames, statics, part, /*pad_frames=*/0);
+	    frames, statics, part, /*pad_frames=*/2);
 	ASSERT_EQ(blocks.size(), 2u);
 	EXPECT_EQ(blocks[0].first,
 	          Addr(xc7series::BlockType::CLB_IO_CLK, 0, 1, 0));
 	EXPECT_EQ(blocks[1].first,
 	          Addr(xc7series::BlockType::CLB_IO_CLK, 1, 0, 0));
-	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(blocks, frames,
-	                                                       statics, part, 0),
+	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(
+	              blocks, frames, statics, part, 2),
 	          8u);
 }
 
@@ -538,11 +538,9 @@ TEST(ConfigurationTest, PartialPacketDataPadsOnlyAtRowEnds) {
 	for (size_t i = 8 * 101; i < padded[0].second.size(); ++i)
 		EXPECT_EQ(padded[0].second[i], 0u);
 
-	// Either way the frame SET is the input's, and the check knows which
-	// padding it was built with.
-	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(none, rowend,
-	                                                       statics, part, 0),
-	          8u);
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(
+	                 none, rowend, statics, part, 0),
+	             std::runtime_error);
 	EXPECT_EQ(Configuration<Series7>::checkPartialFrameSet(padded, rowend,
 	                                                       statics, part, 2),
 	          8u);
