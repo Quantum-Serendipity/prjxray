@@ -44,4 +44,18 @@ run rowend-default-pad refuse "${partial[@]}"
 run rowend-pad3-noverify refuse "${partial[@]}" --pad_frames 3 --noverify
 run rowend-pad4-noverify refuse "${partial[@]}" --pad_frames 4 --noverify
 
+full=(--frm_file "$tmp/rowend.frm")
+run full accept "${full[@]}"
+run full-verify accept "${full[@]}" --verify
+run full-raw refuse "${full[@]}" --raw
+run full-expected-frames refuse "${full[@]}" --expected_frames 3
+run full-static-frames refuse "${full[@]}" --static_frames "$tmp/rowend.frm"
+run full-prepass refuse "${full[@]}" --prepass off
+run full-pad-frames refuse "${full[@]}" --pad_frames 2
+run full-pad-frames-default-value refuse "${full[@]}" --pad_frames 0
+run full-trailing-nops refuse "${full[@]}" --trailing_nops 16
+run full-crc refuse "${full[@]}" --crc compute
+run full-db-root refuse "${full[@]}" --db_root "$tmp"
+run full-tilegrid refuse "${full[@]}" --tilegrid "$tmp/rowend.frm"
+
 [[ $failures -eq 0 ]]

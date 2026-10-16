@@ -14,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <gflags/gflags.h>
@@ -1015,6 +1016,30 @@ int main(int argc, char* argv[]) {
 		             "and the flag would do nothing."
 		          << std::endl;
 		return 1;
+	}
+	if (!FLAGS_partial_bitstream) {
+		std::vector<std::string> ignored;
+		for (const char* name :
+		     {"raw", "expected_frames", "static_frames", "prepass",
+		      "pad_frames", "trailing_nops", "crc", "db_root",
+		      "tilegrid"}) {
+			if (!gflags::GetCommandLineFlagInfoOrDie(name)
+			         .is_default)
+				ignored.push_back(std::string("--") + name);
+		}
+		if (!ignored.empty()) {
+			std::cerr
+			    << "Without --partial_bitstream this writes a "
+			       "FULL bitstream, which does not read";
+			for (const std::string& f : ignored)
+				std::cerr << " " << f;
+			std::cerr << ". Those flags steer the partial path "
+			             "only; a full bitstream zero-fills every "
+			             "frame the .frm leaves out. Pass "
+			             "--partial_bitstream, or drop them."
+			          << std::endl;
+			return 1;
+		}
 	}
 	if (FLAGS_pad_frames > 2) {
 		std::cerr << "--pad_frames is " << FLAGS_pad_frames
