@@ -11,6 +11,8 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -23,6 +25,7 @@
 #include <prjxray/xilinx/bitstream_writer.h>
 #include <prjxray/xilinx/configuration.h>
 #include <prjxray/xilinx/xc7series/configuration_options_1_value.h>
+#include <prjxray/xilinx/xc7series/stream_replay.h>
 
 DEFINE_string(part_name, "", "Name of the 7-series part");
 DEFINE_string(part_file, "", "Definition file for target 7-series part");
@@ -171,18 +174,23 @@ DEFINE_bool(compress,
             "applies to the STATIC bitstream that boots from flash. The "
             "saving is a property of the design's frame density, not of the "
             "flag: it comes from all-zero frames, which are most of a "
-            "7-series device. --verify covers it end to end -- the emitted "
-            "stream is read back through the bitstream READER, whose MFWR "
-            "case expands the replays, and every frame must match the input "
+            "7-series device. --verify reads the emitted stream back twice: "
+            "through the bitstream READER, and through an independent replay "
+            "of the configuration engine that commits N-1 of an FDRI burst's "
+            "N frames, runs the latched CMD on each FAR write, and refuses an "
+            "MFWR outside CMD:MFW, a FAR under CMD:MFW with no MFWR after it, "
+            "and any frame committed twice. Every frame must match the input "
             "word for word. NOT VALIDATED ON SILICON: offline expansion "
             "equality is not proof the engine accepts the stream.");
 DEFINE_bool(verify,
             true,
             "Read the emitted bitstream back through the bitstream READER and "
             "check that every frame of --frm_file landed at its address with "
-            "its exact payload, ECC included. On by default: it costs one "
-            "in-process parse, and a verifier that must be requested will not "
-            "be. --noverify opts out.");
+            "its exact payload, ECC included. For Series7 it also replays the "
+            "stream through a separate model of the configuration engine; "
+            "other architectures get the reader check only. On by default: "
+            "a verifier that must be requested will not be. --noverify opts "
+            "out.");
 DEFINE_uint32(trailing_nops,
               16,
               "NOP words after CMD:DESYNC. 16 in every Vivado golden partial.");
@@ -229,12 +237,52 @@ bool ParseRbcrcAction(
 	return true;
 }
 
+std::string PartDirectoryName(const std::string& part_file) {
+	size_t slash = part_file.find_last_of('/');
+	if (slash == std::string::npos || slash == 0)
+		return std::string();
+	size_t parent = part_file.find_last_of('/', slash - 1);
+	return part_file.substr(
+	    parent == std::string::npos ? 0 : parent + 1,
+	    slash - (parent == std::string::npos ? 0 : parent + 1));
+}
+
+template <typename PartType>
+bool CheckGeometryAgainstPart(const xc7series::PrePassGeometry& geometry,
+                              const PartType& part,
+                              std::string* error) {
+	std::cerr << "xc7frames2bit: the tilegrid-against-part column check "
+	             "is Series7 only and did not run."
+	          << std::endl;
+	return true;
+}
+
+template <>
+bool CheckGeometryAgainstPart<xc7series::Part>(
+    const xc7series::PrePassGeometry& geometry,
+    const xc7series::Part& part,
+    std::string* error) {
+	std::vector<uint32_t> outside = geometry.ColumnsNotInPart(part);
+	if (outside.empty())
+		return true;
+	std::ostringstream err;
+	err << "the pre-pass tilegrid has " << outside.size()
+	    << " configuration column(s) that are not frame addresses of "
+	    << FLAGS_part_file << ", first 0x" << std::hex << std::setw(8)
+	    << std::setfill('0') << outside.front() << std::dec
+	    << ". The tilegrid and --part_file describe different devices.";
+	*error = err.str();
+	return false;
+}
+
 // The pre-pass geometry, from wherever the caller's flags point. There is NO
 // fallback: a mask that cannot be built from the database is not built at all,
 // because the thing it would fall back to -- SITE as a function of (minor,
 // word) -- is the defect this replaces, and it is wrong precisely in the
 // columns nobody looks at.
+template <typename PartType>
 std::unique_ptr<xc7series::PrePassGeometry> LoadPrePassGeometry(
+    const PartType& part,
     std::string* error) {
 	std::string root = FLAGS_db_root;
 	if (root.empty() && !FLAGS_part_file.empty()) {
@@ -260,11 +308,58 @@ std::unique_ptr<xc7series::PrePassGeometry> LoadPrePassGeometry(
 		    "$XRAY_DATABASE_DIR/$XRAY_DATABASE says where it is.";
 		return nullptr;
 	}
-	if (!FLAGS_tilegrid.empty())
-		return xc7series::PrePassGeometry::Load(FLAGS_tilegrid, root,
-		                                        error);
-	return xc7series::PrePassGeometry::LoadForPart(root, FLAGS_part_name,
-	                                               error);
+	std::unique_ptr<xc7series::PrePassGeometry> geometry;
+	if (!FLAGS_tilegrid.empty()) {
+		geometry = xc7series::PrePassGeometry::Load(FLAGS_tilegrid,
+		                                            root, error);
+		std::cerr
+		    << "xc7frames2bit: NOTE: --tilegrid is checked only "
+		       "for columns outside --part_file's frame space; a "
+		       "tilegrid of a smaller device inside that space is "
+		       "not detected."
+		    << std::endl;
+	} else {
+		std::string fabric;
+		if (!xc7series::PrePassGeometry::FabricForPart(
+		        root, FLAGS_part_name, &fabric, error))
+			return nullptr;
+		const std::string file_part =
+		    PartDirectoryName(FLAGS_part_file);
+		std::string file_fabric, why_not;
+		const bool cross_checked =
+		    !file_part.empty() &&
+		    (file_part == FLAGS_part_name ||
+		     xc7series::PrePassGeometry::FabricForPart(
+		         root, file_part, &file_fabric, &why_not));
+		if (!cross_checked)
+			std::cerr
+			    << "xc7frames2bit: NOTE: --part_name's fabric was "
+			       "not cross-checked against --part_file, because "
+			    << (file_part.empty()
+			            ? std::string("--part_file is not inside a "
+			                          "part directory")
+			            : "its directory " + file_part +
+			                  " does not resolve in " + root +
+			                  ": " + why_not)
+			    << std::endl;
+		if (cross_checked && file_part != FLAGS_part_name &&
+		    file_fabric != fabric) {
+			*error =
+			    "--part_name " + FLAGS_part_name +
+			    " resolves to fabric " + fabric +
+			    " and --part_file " + FLAGS_part_file +
+			    " sits in the directory of part " + file_part +
+			    ", fabric " + file_fabric +
+			    ". The pre-pass mask and the frame space would "
+			    "come from different devices.";
+			return nullptr;
+		}
+		geometry = xc7series::PrePassGeometry::LoadForPart(
+		    root, FLAGS_part_name, error);
+	}
+	if (geometry && !CheckGeometryAgainstPart(*geometry, part, error))
+		return nullptr;
+	return geometry;
 }
 
 // What the pre-pass did, on stderr. The two "inferred" lines exist because
@@ -326,12 +421,6 @@ void ReportPrePass(const xilinx::PrePassReport& rep) {
 // Read the file we just wrote, through the bitstream READER -- a different code
 // path from the writer, which is the whole point -- and check that every frame
 // of the input landed at its address with its exact payload.
-//
-// For a double-written stream the reader's frame map keeps the LAST write of
-// each address, which is pass 2, which is the configuration. So this verifies
-// the pass that matters and is blind to the pre-pass by construction; the
-// pre-pass is checked structurally at build time instead, because a frame-level
-// comparator is definitionally blind to it.
 //
 // `flush` names the frames the stream writes PAST the end of a FAR block that
 // stops mid-row, and `flush_source` says what each must contain. They are
@@ -467,6 +556,55 @@ int VerifyRoundTrip(
 		          << first_extra << std::dec << ";";
 	std::cerr << std::endl;
 	return 1;
+}
+
+template <typename ArchType>
+int VerifyReplay(
+    const std::string& path,
+    const typename ArchType::Part& part,
+    const typename xilinx::Frames<ArchType>::Frames2Data& want,
+    const typename xilinx::Frames<ArchType>::Frames2Data& flush_source,
+    const typename xilinx::Frames<ArchType>::Frames2Data* prepass) {
+	std::cerr << "xc7frames2bit: --verify: the independent replay models "
+	             "Series7 only; this stream was checked by the reader "
+	             "alone."
+	          << std::endl;
+	return 0;
+}
+
+template <>
+int VerifyReplay<xilinx::Series7>(
+    const std::string& path,
+    const xc7series::Part& part,
+    const xilinx::Frames<xilinx::Series7>::Frames2Data& want,
+    const xilinx::Frames<xilinx::Series7>::Frames2Data& flush_source,
+    const xilinx::Frames<xilinx::Series7>::Frames2Data* prepass) {
+	auto fail = [](const std::string& why) {
+		std::cerr << "xc7frames2bit: --verify FAILED (independent "
+		             "replay). "
+		          << why << std::endl;
+		return 1;
+	};
+	std::ifstream in(path, std::ios::binary);
+	if (!in)
+		return fail("cannot reopen " + path);
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+	                           std::istreambuf_iterator<char>());
+	xc7series::StreamReplay replay;
+	std::string error;
+	if (!xc7series::ReplayConfigurationStream(bytes, part, &replay, &error))
+		return fail(error + ".");
+	if (!xc7series::CheckReplayedFrames(replay, want, flush_source, prepass,
+	                                    &error))
+		return fail(error);
+	const size_t passes = prepass ? 2 : 1;
+	std::cerr << "xc7frames2bit: --verify independent replay OK, "
+	          << want.size() << " frames committed " << passes
+	          << " time(s) each, " << replay.discarded.size()
+	          << " frame(s) held back carrying the static, "
+	          << replay.dummy_frames << " into dummy positions, "
+	          << replay.mfw_replays << " MFW replay(s)" << std::endl;
+	return 0;
 }
 
 }  // namespace
@@ -662,8 +800,8 @@ struct Frames2BitWriter {
 					// No geometry, no pre-pass -- there is
 					// no degraded mask to fall back to.
 					std::string geo_error;
-					auto geometry =
-					    LoadPrePassGeometry(&geo_error);
+					auto geometry = LoadPrePassGeometry(
+					    *part, &geo_error);
 					if (!geometry)
 						throw std::runtime_error(
 						    "Cannot build the "
@@ -806,9 +944,14 @@ struct Frames2BitWriter {
 			}
 
 			if (FLAGS_verify &&
-			    VerifyRoundTrip<ArchType>(
-			        FLAGS_output_file, *part, frames.getFrames(),
-			        flush_addresses, static_frames.getFrames()))
+			    (VerifyRoundTrip<ArchType>(
+			         FLAGS_output_file, *part, frames.getFrames(),
+			         flush_addresses, static_frames.getFrames()) ||
+			     VerifyReplay<ArchType>(
+			         FLAGS_output_file, *part, frames.getFrames(),
+			         static_frames.getFrames(),
+			         prepass_frames.empty() ? nullptr
+			                                : &prepass_frames)))
 				return 1;
 		} else {
 			if (std::is_same<ArchType, xilinx::Series7>::value ||
@@ -937,8 +1080,13 @@ struct Frames2BitWriter {
 			}
 
 			if (FLAGS_verify &&
-			    VerifyRoundTrip<ArchType>(FLAGS_output_file, *part,
-			                              frames.getFrames()))
+			    (VerifyRoundTrip<ArchType>(FLAGS_output_file, *part,
+			                               frames.getFrames()) ||
+			     VerifyReplay<ArchType>(
+			         FLAGS_output_file, *part, frames.getFrames(),
+			         typename xilinx::Frames<
+			             ArchType>::Frames2Data(),
+			         nullptr)))
 				return 1;
 		}
 

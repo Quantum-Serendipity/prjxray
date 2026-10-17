@@ -11,6 +11,8 @@
 #define PRJXRAY_LIB_XILINX_FRAMES_H
 
 #include <algorithm>
+#include <cassert>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -87,6 +89,37 @@ class Frames {
 	               FrameData& data);
 };
 
+namespace frames_detail {
+
+inline bool ParseHex32(const std::string& token, uint32_t* out) {
+	size_t i = 0;
+	if (token.size() >= 2 && token[0] == '0' &&
+	    (token[1] == 'x' || token[1] == 'X'))
+		i = 2;
+	if (i == token.size())
+		return false;
+	uint64_t value = 0;
+	for (; i < token.size(); ++i) {
+		const char c = token[i];
+		uint32_t digit;
+		if (c >= '0' && c <= '9')
+			digit = c - '0';
+		else if (c >= 'a' && c <= 'f')
+			digit = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F')
+			digit = c - 'A' + 10;
+		else
+			return false;
+		value = (value << 4) | digit;
+		if (value > 0xFFFFFFFFull)
+			return false;
+	}
+	*out = static_cast<uint32_t>(value);
+	return true;
+}
+
+}  // namespace frames_detail
+
 template <typename ArchType>
 int Frames<ArchType>::readFrames(const std::string& frm_file_str) {
 	assert(!frm_file_str.empty());
@@ -104,27 +137,31 @@ int Frames<ArchType>::readFrames(const std::string& frm_file_str) {
 		++line_number;
 		if (frm_line[0] == '#')
 			continue;
+		if (frm_file.eof()) {
+			std::cerr << frm_file_str << ":" << line_number
+			          << ": the last line has no terminating "
+			             "newline, so the file may be truncated"
+			          << std::endl;
+			return 1;
+		}
 
-		std::pair<std::string, std::string> frame_delta =
-		    absl::StrSplit(frm_line, ' ');
-
-		uint32_t frame_address;
-		std::vector<std::string> frame_data_strings =
-		    absl::StrSplit(frame_delta.second, ',');
+		std::vector<std::string> fields = absl::StrSplit(frm_line, ' ');
+		uint32_t frame_address = 0;
+		std::vector<std::string> frame_data_strings;
+		bool parsed =
+		    fields.size() == 2 &&
+		    frames_detail::ParseHex32(fields[0], &frame_address);
+		if (parsed)
+			frame_data_strings = absl::StrSplit(fields[1], ',');
 		FrameData frame_data(frame_data_strings.size(), 0);
-		try {
-			frame_address =
-			    std::stoul(frame_delta.first, nullptr, 16);
-			std::transform(
-			    frame_data_strings.begin(),
-			    frame_data_strings.end(), frame_data.begin(),
-			    [](const std::string& val) -> uint32_t {
-				    return std::stoul(val, nullptr, 16);
-			    });
-		} catch (const std::logic_error&) {
+		for (size_t w = 0; parsed && w < frame_data_strings.size(); ++w)
+			parsed = frames_detail::ParseHex32(
+			    frame_data_strings[w], &frame_data[w]);
+		if (!parsed) {
 			std::cerr << frm_file_str << ":" << line_number
 			          << ": not a frame line of the form "
-			             "<frame_address> <word1>,...,<wordN>"
+			             "<frame_address> <word1>,...,<wordN> with "
+			             "every value a 32-bit hexadecimal number"
 			          << std::endl;
 			return 1;
 		}

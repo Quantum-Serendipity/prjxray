@@ -222,3 +222,86 @@ TEST(FramesTest, ReadFramesRefusesAnUnparsableLine) {
 	                    {"0x100 0x1,zz," + std::string("0x0")}, &words));
 	EXPECT_NE(rc, 0);
 }
+
+namespace {
+
+int ReadFrameText(const std::string& text, Frames<Series7>* frames) {
+	char path[] = "/tmp/prjxray_frames_text_XXXXXX";
+	int fd = mkstemp(path);
+	EXPECT_NE(fd, -1);
+	{
+		std::ofstream f(path, std::ios::binary);
+		f << text;
+	}
+	close(fd);
+	int rc = frames->readFrames(path);
+	std::remove(path);
+	return rc;
+}
+
+std::string WordList(int words, const std::string& last) {
+	std::string out;
+	for (int w = 0; w + 1 < words; ++w)
+		out += "0x00000001,";
+	return out + last;
+}
+
+}  // namespace
+
+TEST(FramesTest, ReadFramesRefusesATokenWithTrailingJunk) {
+	const std::vector<std::string> lines = {
+	    "0x0000000G1 " + WordList(101, "0x00000001"),
+	    "0x100 " + WordList(101, "0x0000000G1"),
+	    "0x100 " + WordList(101, "0x00000001zz"),
+	    "0x100 " + WordList(101, "0x"),
+	    "0x100 " + WordList(101, " 0x1"),
+	};
+	for (const std::string& line : lines) {
+		Frames<Series7> frames;
+		EXPECT_NE(ReadFrameLines({line}, &frames), 0) << line;
+	}
+}
+
+TEST(FramesTest, ReadFramesRefusesAValueWiderThan32Bits) {
+	Frames<Series7> words;
+	EXPECT_NE(
+	    ReadFrameLines({"0x100 " + WordList(101, "0x1ffffffff")}, &words),
+	    0);
+	Frames<Series7> address;
+	EXPECT_NE(ReadFrameLines({"0x1000015a7 " + WordList(101, "0x00000001")},
+	                         &address),
+	          0);
+	Frames<Series7> leading_zeros;
+	EXPECT_EQ(ReadFrameLines({"0x100 " + WordList(101, "0x000000001")},
+	                         &leading_zeros),
+	          0);
+}
+
+TEST(FramesTest, ReadFramesRefusesANegativeValue) {
+	Frames<Series7> frames;
+	EXPECT_NE(ReadFrameLines({"0x100 " + WordList(101, "-1")}, &frames), 0);
+}
+
+TEST(FramesTest, ReadFramesRefusesAThirdField) {
+	Frames<Series7> frames;
+	EXPECT_NE(
+	    ReadFrameLines({"0x100 " + WordList(101, "0x00000001") + " 0x5"},
+	                   &frames),
+	    0);
+}
+
+TEST(FramesTest, ReadFramesRefusesTwoLinesRunTogether) {
+	Frames<Series7> frames;
+	EXPECT_NE(ReadFrameLines({"0x100 " + WordList(101, "0x00000001") +
+	                          "0x101 " + WordList(101, "0x00000001")},
+	                         &frames),
+	          0);
+}
+
+TEST(FramesTest, ReadFramesRefusesAFileCutInsideItsLastWord) {
+	const std::string whole = "0x100 " + WordList(101, "0x00abcdef") + "\n";
+	Frames<Series7> intact;
+	EXPECT_EQ(ReadFrameText(whole, &intact), 0);
+	Frames<Series7> cut;
+	EXPECT_NE(ReadFrameText(whole.substr(0, whole.size() - 5), &cut), 0);
+}

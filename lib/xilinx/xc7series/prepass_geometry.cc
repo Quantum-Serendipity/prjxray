@@ -213,18 +213,12 @@ const PrePassGeometry::FrameMasks& PrePassGeometry::MasksFor(
 	return cache_.emplace(key, std::move(masks)).first->second;
 }
 
-std::unique_ptr<PrePassGeometry> PrePassGeometry::LoadForPart(
-    const std::string& db_root,
-    const std::string& part,
-    std::string* error) {
-	// prjxray/util.py:get_fabric_for_part, in C++: parts.yaml gives the
-	// part's device, devices.yaml gives the device's fabric, and the fabric
-	// is the directory that carries tilegrid.json. The part directory
-	// (xc7a100tcsg324-1) and the fabric directory (xc7a100t) are different
-	// directories and only one of them holds part.yaml.
+bool PrePassGeometry::FabricForPart(const std::string& db_root,
+                                    const std::string& part,
+                                    std::string* fabric,
+                                    std::string* error) {
 	const std::string parts_path = db_root + "/mapping/parts.yaml";
 	const std::string devices_path = db_root + "/mapping/devices.yaml";
-	std::string device, fabric;
 	try {
 		YAML::Node parts = YAML::LoadFile(parts_path);
 		YAML::Node entry = parts[part];
@@ -232,26 +226,45 @@ std::unique_ptr<PrePassGeometry> PrePassGeometry::LoadForPart(
 			if (error)
 				*error = "part '" + part + "' is not in " +
 				         parts_path;
-			return nullptr;
+			return false;
 		}
-		device = entry["device"].as<std::string>();
+		const std::string device = entry["device"].as<std::string>();
 		YAML::Node devices = YAML::LoadFile(devices_path);
 		YAML::Node dev = devices[device];
 		if (!dev || !dev["fabric"]) {
 			if (error)
 				*error = "device '" + device +
 				         "' is not in " + devices_path;
-			return nullptr;
+			return false;
 		}
-		fabric = dev["fabric"].as<std::string>();
+		*fabric = dev["fabric"].as<std::string>();
 	} catch (const std::exception& e) {
 		if (error)
 			*error = std::string("cannot resolve the fabric for '") +
 			         part + "' through " + parts_path + " and " +
 			         devices_path + ": " + e.what();
-		return nullptr;
+		return false;
 	}
+	return true;
+}
+
+std::unique_ptr<PrePassGeometry> PrePassGeometry::LoadForPart(
+    const std::string& db_root,
+    const std::string& part,
+    std::string* error) {
+	std::string fabric;
+	if (!FabricForPart(db_root, part, &fabric, error))
+		return nullptr;
 	return Load(db_root + "/" + fabric + "/tilegrid.json", db_root, error);
+}
+
+std::vector<uint32_t> PrePassGeometry::ColumnsNotInPart(
+    const Part& part) const {
+	std::vector<uint32_t> outside;
+	for (const auto& column : columns_)
+		if (!part.IsValidFrameAddress(FrameAddress(column.first)))
+			outside.push_back(column.first);
+	return outside;
 }
 
 std::unique_ptr<PrePassGeometry> PrePassGeometry::Load(

@@ -131,6 +131,19 @@ struct FullStreamOptions {
 	const CompressedFrameData* compressed = nullptr;
 };
 
+uint32_t Series7FullStreamCor0();
+
+template <typename ArchType>
+uint32_t FullStreamCor1Default();
+template <>
+uint32_t FullStreamCor1Default<Series7>();
+template <>
+uint32_t FullStreamCor1Default<Spartan6>();
+template <>
+uint32_t FullStreamCor1Default<UltraScale>();
+template <>
+uint32_t FullStreamCor1Default<UltraScalePlus>();
+
 template <typename ArchType>
 class Configuration {
        public:
@@ -753,8 +766,28 @@ size_t Configuration<ArchType>::checkPartialFrameSet(
 				throw std::runtime_error(
 				    "A partial-bitstream block runs past the "
 				    "last frame of the device.");
-			if (!frames.count(*address))
+			auto source = frames.find(*address);
+			if (source == frames.end())
 				break;
+			const size_t base_word =
+			    i * static_cast<size_t>(ArchType::words_per_frame);
+			if (source->second.size() !=
+			        ArchType::words_per_frame ||
+			    !std::equal(source->second.begin(),
+			                source->second.end(),
+			                block.second.begin() + base_word)) {
+				std::ostringstream err;
+				err << "A partial-bitstream block writes frame "
+				       "0x"
+				    << std::hex << std::setw(8)
+				    << std::setfill('0')
+				    << static_cast<uint32_t>(*address)
+				    << std::dec
+				    << " with words that differ from the frame "
+				       "set "
+				       "it was built from.";
+				throw std::runtime_error(err.str());
+			}
 			if (!landed.insert(static_cast<uint32_t>(*address))
 			         .second)
 				++duplicated;
