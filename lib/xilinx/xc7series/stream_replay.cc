@@ -9,6 +9,7 @@
  */
 #include <prjxray/xilinx/xc7series/stream_replay.h>
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -200,6 +201,15 @@ class Replayer {
 			if (pending_) {
 				Commit(pending_at_, frame_buffer_);
 				pending_at_ = Advance(pending_at_);
+				if (pending_at_.past_end &&
+				    pending_at_.dummy > kRowEndDummyPositions)
+					return Fail(
+					    "an FDRI write runs more than " +
+					    std::to_string(
+					        kRowEndDummyPositions) +
+					    " frames past the last frame of "
+					    "the "
+					    "part");
 			} else {
 				if (!position_.valid)
 					return Fail(
@@ -358,6 +368,74 @@ bool ReplayConfigurationStream(const std::vector<uint8_t>& bytes,
 		return false;
 	}
 	out->desynced = replayer.desynced();
+	return true;
+}
+
+bool CheckReplayedFrames(const StreamReplay& replay,
+                         const ReplayFrameMap& want,
+                         const ReplayFrameMap& flush_source,
+                         const ReplayFrameMap* prepass,
+                         std::string* error) {
+	auto fail = [error](const std::string& why) {
+		*error = why;
+		return false;
+	};
+	if (!replay.desynced)
+		return fail("the stream never writes CMD:DESYNC.");
+
+	const size_t passes = prepass ? 2 : 1;
+	std::map<uint32_t, std::vector<size_t>> by_address;
+	for (size_t i = 0; i < replay.committed.size(); ++i)
+		by_address[replay.committed[i].address].push_back(i);
+
+	size_t last_first_pass = 0, first_second_pass = replay.committed.size();
+	for (const auto& frame : want) {
+		const uint32_t a = static_cast<uint32_t>(frame.first);
+		auto it = by_address.find(a);
+		const size_t n = it == by_address.end() ? 0 : it->second.size();
+		if (n != passes)
+			return fail("frame " + Hex(a) + " is committed " +
+			            std::to_string(n) + " time(s), expected " +
+			            std::to_string(passes) + ".");
+		if (replay.committed[it->second.back()].words != frame.second)
+			return fail("frame " + Hex(a) +
+			            " is committed last with words that differ "
+			            "from the input.");
+		if (!prepass)
+			continue;
+		auto p1 = prepass->find(frame.first);
+		if (p1 == prepass->end())
+			return fail("frame " + Hex(a) +
+			            " has no pre-pass frame to compare with.");
+		if (replay.committed[it->second.front()].words != p1->second)
+			return fail(
+			    "frame " + Hex(a) +
+			    " is committed first with words that differ "
+			    "from its pre-pass frame.");
+		last_first_pass = std::max(last_first_pass, it->second.front());
+		first_second_pass =
+		    std::min(first_second_pass, it->second.back());
+	}
+	if (prepass && !want.empty() && last_first_pass > first_second_pass)
+		return fail(
+		    "a pre-pass frame is committed after a configuration-pass "
+		    "frame; pass 1 of every block must precede pass 2 of any.");
+	for (const auto& entry : by_address)
+		if (!want.count(FrameAddress(entry.first)))
+			return fail("frame " + Hex(entry.first) +
+			            " is committed and the input did not ask "
+			            "for it.");
+	for (const auto& held : replay.discarded) {
+		auto src = flush_source.find(FrameAddress(held.address));
+		if (src == flush_source.end())
+			return fail("the frame held back at " +
+			            Hex(held.address) +
+			            " has no static frame to compare with.");
+		if (src->second != held.words)
+			return fail(
+			    "the frame held back at " + Hex(held.address) +
+			    " does not carry the static's own content.");
+	}
 	return true;
 }
 

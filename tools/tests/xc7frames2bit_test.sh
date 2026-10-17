@@ -157,6 +157,19 @@ run prepass-part-name-matches accept "${byname[@]}" --part_name parta
 logged prepass-part-name-matches "fabrica/tilegrid.json"
 run prepass-part-name-other-fabric refuse "${byname[@]}" --part_name partb
 logged prepass-part-name-other-fabric "resolves to fabric fabricb"
+mkdir -p "$fam/unlisted"
+cp "$PART" "$fam/unlisted/part.yaml"
+run prepass-part-file-unlisted accept "${byname[@]}" --part_name parta \
+	--part_file "$fam/unlisted/part.yaml"
+logged prepass-part-file-unlisted "was not cross-checked against --part_file"
+logged prepass-part-file-unlisted "does not resolve in"
+if grep -qF "not cross-checked" "$tmp/prepass-part-name-matches.log"; then
+	echo "FAIL prepass-part-name-matches: says it did not cross-check"
+	failures=$((failures + 1))
+else
+	echo "ok   prepass-part-name-matches: no cross-check note"
+fi
+logged prepass-on "checked only for columns outside --part_file's frame space"
 
 run full-uncompressed accept "${full[@]}"
 cp "$tmp/out.bit" "$tmp/uncompressed.bit"
@@ -172,5 +185,12 @@ fi
 run compress-partial refuse "${partial[@]}" --compress
 run compress-ultrascale refuse "${full[@]}" --compress \
 	--architecture UltraScale
+{
+	printf '0x%08x ' 0x15a7
+	for w in $(seq 2 123); do printf '0x00000001,'; done
+	printf '0x00000001\n'
+} > "$tmp/us.frm"
+run ultrascale-verify accept --architecture UltraScale --frm_file "$tmp/us.frm"
+logged ultrascale-verify "the independent replay models Series7 only"
 
 [[ $failures -eq 0 ]]

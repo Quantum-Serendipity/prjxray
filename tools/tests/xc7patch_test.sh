@@ -17,17 +17,36 @@ check() {
 	fi
 }
 
+hex_offset() {
+	od -An -v -tx1 "$1" | tr -d ' \n' | awk -v p="$2" '{
+		s = $0; base = 0
+		while ((i = index(s, p)) > 0) {
+			if ((base + i - 1) % 2 == 0) { print (base + i - 1) / 2; break }
+			s = substr(s, i + 1); base += i
+		}
+	}'
+}
+
 payload() {
 	local off
-	off=$(LC_ALL=C grep -obUaP '\xaa\x99\x55\x66' "$1" | head -1 | cut -d: -f1)
+	off=$(hex_offset "$1" aa995566)
 	[[ -n $off ]] && tail -c +$((off + 1)) "$1"
 }
 
-{
+same_payload() {
+	local a b
+	a=$(payload "$1" | od -An -v -tx1 | tr -d ' \n')
+	b=$(payload "$2" | od -An -v -tx1 | tr -d ' \n')
+	[[ -n $a && $a == "$b" ]]
+}
+
+one_frame() {
 	printf '0x%08x ' 0x15a7
-	for w in $(seq 1 100); do printf '0x00000001,'; done
+	for w in $(seq 2 "$1"); do printf '0x00000001,'; done
 	printf '0x00000001\n'
-} > "$tmp/one.frm"
+}
+one_frame 101 > "$tmp/one.frm"
+one_frame 123 > "$tmp/one-us.frm"
 
 for variant in plain crc rbcrc; do
 	case $variant in
@@ -43,8 +62,7 @@ for variant in plain crc rbcrc; do
 		--output_file "$tmp/$variant-patched.bit" \
 		> "$tmp/$variant-patch.log" 2>&1
 	check "$variant: xc7patch rc 0" $?
-	cmp -s <(payload "$tmp/$variant.bit") \
-		<(payload "$tmp/$variant-patched.bit")
+	same_payload "$tmp/$variant.bit" "$tmp/$variant-patched.bit"
 	check "$variant: patching with no delta reproduces the payload" $?
 done
 
@@ -70,7 +88,7 @@ rc=$?
 check "compressed base: refused, rc $rc" $?
 
 cp "$tmp/plain.bit" "$tmp/cor0.bit"
-off=$(LC_ALL=C grep -obUaP '\x30\x01\x20\x01' "$tmp/cor0.bit" | head -1 | cut -d: -f1)
+off=$(hex_offset "$tmp/cor0.bit" 30012001)
 [[ -n $off ]]
 check "cor0: the base writes COR0" $?
 if [[ -n $off ]]; then
@@ -85,5 +103,33 @@ check "cor0: the rewrite changed the base" $?
 rc=$?
 [[ $rc -eq 1 ]] && grep -qF "would change COR0" "$tmp/cor0.log"
 check "rewritten COR0: refused, rc $rc" $?
+
+"$X2B" --architecture UltraScale --part_file "$PART" --frm_file "$tmp/one-us.frm" \
+	--output_file "$tmp/us.bit" > "$tmp/us-x2b.log" 2>&1
+check "ultrascale: base written" $?
+"$PATCH" --architecture UltraScale --part_file "$PART" \
+	--bitstream_file "$tmp/us.bit" --output_file "$tmp/us-patched.bit" \
+	> "$tmp/us-patch.log" 2>&1
+check "ultrascale: xc7patch rc 0" $?
+same_payload "$tmp/us.bit" "$tmp/us-patched.bit"
+check "ultrascale: patching with no delta reproduces the payload" $?
+
+cp "$tmp/us.bit" "$tmp/us-cor1.bit"
+off=$(hex_offset "$tmp/us-cor1.bit" 3001c001)
+[[ -n $off ]]
+check "ultrascale cor1: the base writes COR1" $?
+if [[ -n $off ]]; then
+	printf '\x00\x00\x00\x00' |
+		dd of="$tmp/us-cor1.bit" bs=1 seek=$((off + 4)) conv=notrunc 2>/dev/null
+fi
+cmp -s "$tmp/us.bit" "$tmp/us-cor1.bit"
+[[ $? -eq 1 ]]
+check "ultrascale cor1: the rewrite changed the base" $?
+"$PATCH" --architecture UltraScale --part_file "$PART" \
+	--bitstream_file "$tmp/us-cor1.bit" --output_file "$tmp/us-cor1-patched.bit" \
+	> "$tmp/us-cor1.log" 2>&1
+rc=$?
+[[ $rc -eq 1 ]] && grep -qF "would change COR1" "$tmp/us-cor1.log"
+check "ultrascale rewritten COR1: refused, rc $rc" $?
 
 [[ $failures -eq 0 ]]

@@ -159,12 +159,19 @@ struct BitstreamPatcher {
 			options.emit_crc = base_writes_crc;
 			if (base_cor1 && *base_cor1 != 0)
 				options.cor1 = base_cor1;
-		} else if (base_cor1) {
+		} else if (base_cor1 &&
+		           *base_cor1 !=
+		               xilinx::FullStreamCor1Default<ArchType>()) {
 			std::cerr
-			    << FLAGS_bitstream_file
-			    << " writes COR1, which this tool carries for "
-			       "Series7 only. Patching it would drop that "
-			       "write's value. Refusing."
+			    << FLAGS_bitstream_file << " writes COR1 0x"
+			    << std::hex << std::setw(8) << std::setfill('0')
+			    << *base_cor1 << " and this tool emits 0x"
+			    << std::setw(8)
+			    << xilinx::FullStreamCor1Default<ArchType>()
+			    << std::dec
+			    << " for this architecture, with no way to carry "
+			       "another value. Patching it would change COR1. "
+			       "Refusing."
 			    << std::endl;
 			return 1;
 		} else if (base_writes_crc) {

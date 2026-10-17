@@ -395,3 +395,156 @@ TEST(StreamReplayTest, CompressedFrameSetCheckRefusesWrongReplays) {
 	                 shifted, frames, part),
 	             std::runtime_error);
 }
+
+TEST(StreamReplayTest, FramesPastTheLastDevicePositionAreRefused) {
+	auto part = ReplayTestPart();
+	const uint32_t last = Far(xc7series::BlockType::BLOCK_RAM, 0, 1, 3);
+	for (int pads = 0; pads <= 3; ++pads) {
+		std::vector<std::vector<uint32_t>> f = {Frame(1)};
+		for (int p = 0; p < pads; ++p)
+			f.push_back(Frame(0));
+		auto bytes = Stream()
+		                 .Cmd(xc7series::Command::WCFG)
+		                 .FarWrite(last)
+		                 .Fdri(Concat(f))
+		                 .Cmd(xc7series::Command::DESYNC)
+		                 .Bytes();
+		xc7series::StreamReplay replay;
+		std::string error;
+		const bool ok = xc7series::ReplayConfigurationStream(
+		    bytes, part, &replay, &error);
+		if (pads <= 2) {
+			EXPECT_TRUE(ok) << pads << ": " << error;
+		} else {
+			EXPECT_FALSE(ok) << pads;
+			EXPECT_NE(error.find("past the last frame"),
+			          std::string::npos)
+			    << error;
+		}
+	}
+}
+
+namespace {
+
+struct PrePassCase {
+	xc7series::ReplayFrameMap want;
+	xc7series::ReplayFrameMap prepass;
+	xc7series::ReplayFrameMap statics;
+	xc7series::StreamReplay replay;
+	uint32_t a = Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0);
+	uint32_t b = Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 1);
+	uint32_t held = Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 2);
+
+	PrePassCase() {
+		want[xc7series::FrameAddress(a)] = Frame(0xA2);
+		want[xc7series::FrameAddress(b)] = Frame(0xB2);
+		prepass[xc7series::FrameAddress(a)] = Frame(0xA1);
+		prepass[xc7series::FrameAddress(b)] = Frame(0xB1);
+		statics[xc7series::FrameAddress(held)] = Frame(0x55);
+		replay.committed = {{a, Frame(0xA1)},
+		                    {b, Frame(0xB1)},
+		                    {a, Frame(0xA2)},
+		                    {b, Frame(0xB2)}};
+		replay.discarded = {{held, Frame(0x55)}};
+		replay.desynced = true;
+	}
+
+	bool Check(std::string* error) const {
+		return xc7series::CheckReplayedFrames(replay, want, statics,
+		                                      &prepass, error);
+	}
+};
+
+}  // namespace
+
+TEST(StreamReplayTest, ReplayCheckAcceptsAWellFormedPrePass) {
+	PrePassCase c;
+	std::string error;
+	EXPECT_TRUE(c.Check(&error)) << error;
+}
+
+TEST(StreamReplayTest, ReplayCheckRefusesPassTwoEmittedTwice) {
+	PrePassCase c;
+	c.replay.committed[0].words = Frame(0xA2);
+	c.replay.committed[1].words = Frame(0xB2);
+	std::string error;
+	EXPECT_FALSE(c.Check(&error));
+	EXPECT_NE(error.find("committed first with words that differ"),
+	          std::string::npos)
+	    << error;
+}
+
+TEST(StreamReplayTest, ReplayCheckRefusesPassOneAfterPassTwo) {
+	PrePassCase c;
+	c.replay.committed = {{c.a, Frame(0xA1)},
+	                      {c.a, Frame(0xA2)},
+	                      {c.b, Frame(0xB1)},
+	                      {c.b, Frame(0xB2)}};
+	std::string error;
+	EXPECT_FALSE(c.Check(&error));
+	EXPECT_NE(error.find("pass 1 of every block must precede"),
+	          std::string::npos)
+	    << error;
+}
+
+TEST(StreamReplayTest, ReplayCheckRefusesAnAddressTheInputDidNotAskFor) {
+	PrePassCase c;
+	c.replay.committed.push_back(
+	    {Far(xc7series::BlockType::CLB_IO_CLK, 0, 1, 0), Frame(0)});
+	std::string error;
+	EXPECT_FALSE(c.Check(&error));
+	EXPECT_NE(error.find("the input did not ask for it"), std::string::npos)
+	    << error;
+}
+
+TEST(StreamReplayTest, ReplayCheckRefusesAHeldBackFrameThatIsNotStatic) {
+	PrePassCase c;
+	c.replay.discarded[0].words = Frame(0x66);
+	std::string error;
+	EXPECT_FALSE(c.Check(&error));
+	EXPECT_NE(error.find("does not carry the static's own content"),
+	          std::string::npos)
+	    << error;
+
+	PrePassCase d;
+	d.statics.clear();
+	EXPECT_FALSE(d.Check(&error));
+	EXPECT_NE(error.find("has no static frame"), std::string::npos)
+	    << error;
+}
+
+TEST(StreamReplayTest, ReplayCheckRefusesWrongCountsAndPayloads) {
+	std::string error;
+
+	PrePassCase once;
+	once.replay.committed.erase(once.replay.committed.begin());
+	EXPECT_FALSE(once.Check(&error));
+	EXPECT_NE(error.find("committed 1 time(s), expected 2"),
+	          std::string::npos)
+	    << error;
+
+	PrePassCase last;
+	last.replay.committed[3].words = Frame(0xBB);
+	EXPECT_FALSE(last.Check(&error));
+	EXPECT_NE(error.find("committed last with words that differ"),
+	          std::string::npos)
+	    << error;
+
+	PrePassCase no_desync;
+	no_desync.replay.desynced = false;
+	EXPECT_FALSE(no_desync.Check(&error));
+	EXPECT_NE(error.find("DESYNC"), std::string::npos) << error;
+
+	PrePassCase full;
+	full.replay.committed.erase(full.replay.committed.begin(),
+	                            full.replay.committed.begin() + 2);
+	EXPECT_TRUE(xc7series::CheckReplayedFrames(
+	    full.replay, full.want, full.statics, nullptr, &error))
+	    << error;
+	full.replay.committed.push_back({full.a, Frame(0xA2)});
+	EXPECT_FALSE(xc7series::CheckReplayedFrames(
+	    full.replay, full.want, full.statics, nullptr, &error));
+	EXPECT_NE(error.find("committed 2 time(s), expected 1"),
+	          std::string::npos)
+	    << error;
+}

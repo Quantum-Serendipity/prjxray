@@ -186,9 +186,11 @@ DEFINE_bool(verify,
             true,
             "Read the emitted bitstream back through the bitstream READER and "
             "check that every frame of --frm_file landed at its address with "
-            "its exact payload, ECC included. On by default: it costs one "
-            "in-process parse, and a verifier that must be requested will not "
-            "be. --noverify opts out.");
+            "its exact payload, ECC included. For Series7 it also replays the "
+            "stream through a separate model of the configuration engine; "
+            "other architectures get the reader check only. On by default: "
+            "a verifier that must be requested will not be. --noverify opts "
+            "out.");
 DEFINE_uint32(trailing_nops,
               16,
               "NOP words after CMD:DESYNC. 16 in every Vivado golden partial.");
@@ -235,11 +237,6 @@ bool ParseRbcrcAction(
 	return true;
 }
 
-// The pre-pass geometry, from wherever the caller's flags point. There is NO
-// fallback: a mask that cannot be built from the database is not built at all,
-// because the thing it would fall back to -- SITE as a function of (minor,
-// word) -- is the defect this replaces, and it is wrong precisely in the
-// columns nobody looks at.
 std::string PartDirectoryName(const std::string& part_file) {
 	size_t slash = part_file.find_last_of('/');
 	if (slash == std::string::npos || slash == 0)
@@ -254,6 +251,9 @@ template <typename PartType>
 bool CheckGeometryAgainstPart(const xc7series::PrePassGeometry& geometry,
                               const PartType& part,
                               std::string* error) {
+	std::cerr << "xc7frames2bit: the tilegrid-against-part column check "
+	             "is Series7 only and did not run."
+	          << std::endl;
 	return true;
 }
 
@@ -275,6 +275,11 @@ bool CheckGeometryAgainstPart<xc7series::Part>(
 	return false;
 }
 
+// The pre-pass geometry, from wherever the caller's flags point. There is NO
+// fallback: a mask that cannot be built from the database is not built at all,
+// because the thing it would fall back to -- SITE as a function of (minor,
+// word) -- is the defect this replaces, and it is wrong precisely in the
+// columns nobody looks at.
 template <typename PartType>
 std::unique_ptr<xc7series::PrePassGeometry> LoadPrePassGeometry(
     const PartType& part,
@@ -307,6 +312,12 @@ std::unique_ptr<xc7series::PrePassGeometry> LoadPrePassGeometry(
 	if (!FLAGS_tilegrid.empty()) {
 		geometry = xc7series::PrePassGeometry::Load(FLAGS_tilegrid,
 		                                            root, error);
+		std::cerr
+		    << "xc7frames2bit: NOTE: --tilegrid is checked only "
+		       "for columns outside --part_file's frame space; a "
+		       "tilegrid of a smaller device inside that space is "
+		       "not detected."
+		    << std::endl;
 	} else {
 		std::string fabric;
 		if (!xc7series::PrePassGeometry::FabricForPart(
@@ -314,10 +325,24 @@ std::unique_ptr<xc7series::PrePassGeometry> LoadPrePassGeometry(
 			return nullptr;
 		const std::string file_part =
 		    PartDirectoryName(FLAGS_part_file);
-		std::string file_fabric, ignored;
-		if (!file_part.empty() && file_part != FLAGS_part_name &&
-		    xc7series::PrePassGeometry::FabricForPart(
-		        root, file_part, &file_fabric, &ignored) &&
+		std::string file_fabric, why_not;
+		const bool cross_checked =
+		    !file_part.empty() &&
+		    (file_part == FLAGS_part_name ||
+		     xc7series::PrePassGeometry::FabricForPart(
+		         root, file_part, &file_fabric, &why_not));
+		if (!cross_checked)
+			std::cerr
+			    << "xc7frames2bit: NOTE: --part_name's fabric was "
+			       "not cross-checked against --part_file, because "
+			    << (file_part.empty()
+			            ? std::string("--part_file is not inside a "
+			                          "part directory")
+			            : "its directory " + file_part +
+			                  " does not resolve in " + root +
+			                  ": " + why_not)
+			    << std::endl;
+		if (cross_checked && file_part != FLAGS_part_name &&
 		    file_fabric != fabric) {
 			*error =
 			    "--part_name " + FLAGS_part_name +
@@ -540,6 +565,10 @@ int VerifyReplay(
     const typename xilinx::Frames<ArchType>::Frames2Data& want,
     const typename xilinx::Frames<ArchType>::Frames2Data& flush_source,
     const typename xilinx::Frames<ArchType>::Frames2Data* prepass) {
+	std::cerr << "xc7frames2bit: --verify: the independent replay models "
+	             "Series7 only; this stream was checked by the reader "
+	             "alone."
+	          << std::endl;
 	return 0;
 }
 
@@ -556,11 +585,6 @@ int VerifyReplay<xilinx::Series7>(
 		          << why << std::endl;
 		return 1;
 	};
-	auto hex = [](uint32_t a) {
-		std::ostringstream s;
-		s << "0x" << std::hex << std::setw(8) << std::setfill('0') << a;
-		return s.str();
-	};
 	std::ifstream in(path, std::ios::binary);
 	if (!in)
 		return fail("cannot reopen " + path);
@@ -570,69 +594,10 @@ int VerifyReplay<xilinx::Series7>(
 	std::string error;
 	if (!xc7series::ReplayConfigurationStream(bytes, part, &replay, &error))
 		return fail(error + ".");
-	if (!replay.desynced)
-		return fail("the stream never writes CMD:DESYNC.");
-
+	if (!xc7series::CheckReplayedFrames(replay, want, flush_source, prepass,
+	                                    &error))
+		return fail(error);
 	const size_t passes = prepass ? 2 : 1;
-	std::map<uint32_t, std::vector<size_t>> by_address;
-	for (size_t i = 0; i < replay.committed.size(); ++i)
-		by_address[replay.committed[i].address].push_back(i);
-
-	size_t last_first_pass = 0, first_second_pass = replay.committed.size();
-	for (const auto& frame : want) {
-		const uint32_t a = static_cast<uint32_t>(frame.first);
-		auto it = by_address.find(a);
-		const size_t n = it == by_address.end() ? 0 : it->second.size();
-		if (n != passes)
-			return fail("frame " + hex(a) + " is committed " +
-			            std::to_string(n) + " time(s), expected " +
-			            std::to_string(passes) + ".");
-		const auto& got_last =
-		    replay.committed[it->second.back()].words;
-		if (got_last != frame.second)
-			return fail("frame " + hex(a) +
-			            " is committed last with words that differ "
-			            "from the input.");
-		if (!prepass)
-			continue;
-		auto p1 = prepass->find(frame.first);
-		if (p1 == prepass->end())
-			return fail("frame " + hex(a) +
-			            " has no pre-pass frame to compare with.");
-		if (replay.committed[it->second.front()].words != p1->second)
-			return fail(
-			    "frame " + hex(a) +
-			    " is committed first with words that differ "
-			    "from its pre-pass frame.");
-		last_first_pass = std::max(last_first_pass, it->second.front());
-		first_second_pass =
-		    std::min(first_second_pass, it->second.back());
-	}
-	if (prepass && !want.empty() && last_first_pass > first_second_pass)
-		return fail(
-		    "a pre-pass frame is committed after a configuration-pass "
-		    "frame; pass 1 of every block must precede pass 2 of any.");
-	for (const auto& entry : by_address) {
-		typename xilinx::Frames<xilinx::Series7>::Frames2Data::key_type
-		    key(entry.first);
-		if (!want.count(key))
-			return fail("frame " + hex(entry.first) +
-			            " is committed and the input did not ask "
-			            "for it.");
-	}
-	for (const auto& held : replay.discarded) {
-		auto src = flush_source.find(
-		    xilinx::Frames<xilinx::Series7>::Frames2Data::key_type(
-		        held.address));
-		if (src == flush_source.end())
-			return fail("the frame held back at " +
-			            hex(held.address) +
-			            " has no static frame to compare with.");
-		if (src->second != held.words)
-			return fail(
-			    "the frame held back at " + hex(held.address) +
-			    " does not carry the static's own content.");
-	}
 	std::cerr << "xc7frames2bit: --verify independent replay OK, "
 	          << want.size() << " frames committed " << passes
 	          << " time(s) each, " << replay.discarded.size()

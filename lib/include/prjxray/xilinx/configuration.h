@@ -134,6 +134,17 @@ struct FullStreamOptions {
 uint32_t Series7FullStreamCor0();
 
 template <typename ArchType>
+uint32_t FullStreamCor1Default();
+template <>
+uint32_t FullStreamCor1Default<Series7>();
+template <>
+uint32_t FullStreamCor1Default<Spartan6>();
+template <>
+uint32_t FullStreamCor1Default<UltraScale>();
+template <>
+uint32_t FullStreamCor1Default<UltraScalePlus>();
+
+template <typename ArchType>
 class Configuration {
        public:
 	using FrameMap = std::map<typename ArchType::FrameAddress,

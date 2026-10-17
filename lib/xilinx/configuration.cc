@@ -115,7 +115,8 @@ void Configuration<Spartan6>::createConfigurationPackage(
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::COR1, {0x3d08}));
+	        ConfigurationRegister::COR1,
+	        {FullStreamCor1Default<Spartan6>()}));
 
 	// Configurations Options2
 	out_packets.emplace_back(
@@ -848,6 +849,26 @@ size_t Configuration<Series7>::checkCompressedFrameSet(
 	return written.size();
 }
 
+template <>
+uint32_t FullStreamCor1Default<Series7>() {
+	return 0x0;
+}
+
+template <>
+uint32_t FullStreamCor1Default<Spartan6>() {
+	return 0x3d08;
+}
+
+template <>
+uint32_t FullStreamCor1Default<UltraScale>() {
+	return 0x400000;
+}
+
+template <>
+uint32_t FullStreamCor1Default<UltraScalePlus>() {
+	return 0x400000;
+}
+
 uint32_t Series7FullStreamCor0() {
 	return xc7series::ConfigurationOptions0Value()
 	    .SetAddPipelineStageForDoneIn(true)
@@ -970,7 +991,8 @@ void Configuration<Series7>::createConfigurationPackage(
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::COR1, {options.cor1.value_or(0x0)}));
+	        ConfigurationRegister::COR1,
+	        {options.cor1.value_or(FullStreamCor1Default<Series7>())}));
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
@@ -1216,7 +1238,8 @@ void Configuration<UltraScale>::createConfigurationPackage(
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::COR1, {0x400000}));
+	        ConfigurationRegister::COR1,
+	        {FullStreamCor1Default<UltraScale>()}));
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
@@ -1412,7 +1435,8 @@ void Configuration<UltraScalePlus>::createConfigurationPackage(
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	        ConfigurationRegister::COR1, {0x400000}));
+	        ConfigurationRegister::COR1,
+	        {FullStreamCor1Default<UltraScalePlus>()}));
 	out_packets.emplace_back(
 	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
 	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,

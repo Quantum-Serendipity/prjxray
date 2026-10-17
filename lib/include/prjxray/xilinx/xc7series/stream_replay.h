@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,14 @@ bool ReplayConfigurationStream(const std::vector<uint8_t>& bytes,
                                const Part& part,
                                StreamReplay* out,
                                std::string* error);
+
+using ReplayFrameMap = std::map<FrameAddress, std::vector<uint32_t>>;
+
+bool CheckReplayedFrames(const StreamReplay& replay,
+                         const ReplayFrameMap& want,
+                         const ReplayFrameMap& flush_source,
+                         const ReplayFrameMap* prepass,
+                         std::string* error);
 
 }  // namespace xc7series
 }  // namespace xilinx

@@ -116,7 +116,6 @@ class PrePassGeometry {
 	    const std::string& segbits_dir,
 	    std::string* error);
 
-	// Cached; the caller may hold the reference until the next call.
 	static bool FabricForPart(const std::string& db_root,
 	                          const std::string& part,
 	                          std::string* fabric,
@@ -124,6 +123,7 @@ class PrePassGeometry {
 
 	std::vector<uint32_t> ColumnsNotInPart(const Part& part) const;
 
+	// Cached; the caller may hold the reference until the next call.
 	const FrameMasks& MasksFor(const FrameAddress& address) const;
 
 	// One line for stderr: what was loaded and from where. A geometry that
