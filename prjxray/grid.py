@@ -15,6 +15,8 @@ import re
 
 CLOCK_REGION_RE = re.compile('X([0-9])Y([0-9])')
 
+_MAX_TILE_FRAMES = 128
+
 
 class Grid(object):
     """ Object that represents grid for a given database.
@@ -87,6 +89,8 @@ class Grid(object):
         x, y = zip(*self.loc.keys())
         self._dims = (min(x), max(x), min(y), max(y))
 
+        self._tiles_by_base_address = None
+
     def tiles(self):
         """ Return list of tiles. """
         return self.tileinfo.keys()
@@ -123,6 +127,24 @@ class Grid(object):
                     tile=tile,
                     bits=bits,
                 )
+
+    def tiles_containing(self, block_type, frame, word):
+        if self._tiles_by_base_address is None:
+            index = {}
+            for tile, gridinfo in self.tileinfo.items():
+                for bt, bits in gridinfo.bits.items():
+                    index.setdefault((bt, bits.base_address), []).append(
+                        (tile, bits))
+            self._tiles_by_base_address = index
+
+        found = []
+        for base_address in range(frame, frame - _MAX_TILE_FRAMES, -1):
+            for tile, bits in self._tiles_by_base_address.get(
+                (block_type, base_address), ()):
+                if frame < base_address + bits.frames and \
+                        bits.offset <= word < bits.offset + bits.words:
+                    found.append(tile)
+        return found
 
     def get_segment_map(self):
         return segment_map.SegmentMap(self)

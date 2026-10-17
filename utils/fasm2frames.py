@@ -423,6 +423,13 @@ def run(
         # whenever any IOB feature is set on an HP-bank tile, mirroring the
         # STEPDOWN walk above.
         glue_missing = []
+
+        def inject_glue(line):
+            try:
+                assembler.add_fasm_line(line, glue_missing)
+            except fasm_assembler.FasmTileWindowViolation as e:
+                glue_missing.append(str(e))
+
         liob_in_features = defaultdict(lambda: {'in': False, 'out': False, 'diff_in': False})
         for set_feature in set_features:
             if set_feature.value == 0:
@@ -512,12 +519,12 @@ def run(
             if kind['in']:
                 feature = "{}.{}.IBUF_HP_BANK_GLUE".format(tile, site)
                 for line in fasm.parse_fasm_string(feature):
-                    assembler.add_fasm_line(line, glue_missing)
+                    inject_glue(line)
             if kind['out'] and ologic_beside(tile,
                                              site) not in configured_ologics:
                 feature = "{}.{}.OBUF_HP_BANK_GLUE".format(tile, site)
                 for line in fasm.parse_fasm_string(feature):
-                    assembler.add_fasm_line(line, glue_missing)
+                    inject_glue(line)
             if kind['diff_in']:
                 # IBUFDS — empirically Vivado lights a 7-bit pattern in the
                 # IOB_Y0 (M-site) slot of the differential pair. Y1 is the
@@ -525,7 +532,7 @@ def run(
                 # no separate Y1 rule is needed.
                 feature = "{}.IOB_Y0.IBUFDS_BANK_GLUE".format(tile)
                 for line in fasm.parse_fasm_string(feature):
-                    assembler.add_fasm_line(line, glue_missing)
+                    inject_glue(line)
             if kind['out'] and site == 'IOB_Y1' and tile.startswith('LIOB18_X81'):
                 any_liob18_y1_obuf = True
 
@@ -533,7 +540,7 @@ def run(
             for tag in ('INT_L_X32Y49.IOB_COL_OBUF_CASCADE_Y1',
                         'INT_L_X32Y49.IOB_COL_BANK_ACTIVE'):
                 for line in fasm.parse_fasm_string(tag):
-                    assembler.add_fasm_line(line, glue_missing)
+                    inject_glue(line)
 
         # GFAN0 T-tie root glue. When the design has an OBUF whose T
         # input must be tied to GND through general routing (e.g. an
@@ -566,7 +573,7 @@ def run(
         if x62_gfan_tile:
             feature = '{}.GFAN_TIE_ROOT_GLUE'.format(x62_gfan_tile)
             for line in fasm.parse_fasm_string(feature):
-                assembler.add_fasm_line(line, glue_missing)
+                inject_glue(line)
 
         # HCLK_L per-BUFRCLK-channel "active" markers. Empirically Vivado
         # sets one extra bit per HCLK_L tile per BUFR channel in use, at
@@ -600,12 +607,7 @@ def run(
                     continue
                 feature = '{}.HCLK_LEAF_BUFRCLK{}_ACTIVE'.format(hclkl_tile, ch)
                 for line in fasm.parse_fasm_string(feature):
-                    assembler.add_fasm_line(line, glue_missing)
-
-        # glue_missing entries indicate the segbits don't carry the rule yet
-        # (e.g. partially-built database); fall through silently rather than
-        # erroring, so this auto-injection is a no-op on databases that
-        # haven't been bank-glue-annotated.
+                    inject_glue(line)
 
     frames = assembler.get_frames(sparse=sparse)
 
