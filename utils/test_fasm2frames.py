@@ -10,10 +10,12 @@
 # SPDX-License-Identifier: ISC
 # TODO: need better coverage for different tile types
 
+import contextlib
 from io import StringIO
 import os
 import os.path
 import re
+import shutil
 import sys
 import unittest
 import tempfile
@@ -444,6 +446,50 @@ class TestKintex7HpBank(unittest.TestCase):
                 (self.IO_COLUMN + 38, 99, 0),
                 (self.IO_COLUMN + 39, 99, 1),
             })
+
+    def test_sing_input_glue_with_no_word_in_the_tile_is_reported(self):
+        err = StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_fasm(
+                'RIOB18_SING_X95Y49.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN')
+        self.assertIn('WARNING: injected glue not written', err.getvalue())
+        self.assertIn(
+            'RIOB18_SING_X95Y49.IOB_Y1.IBUF_HP_BANK_GLUE', err.getvalue())
+        self.assertIn('lands in no tile', err.getvalue())
+
+    def with_glue_row(self, row):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, 'db')
+        shutil.copytree(self.DB, db)
+        segbits = os.path.join(db, 'segbits_riob18.db')
+        with open(segbits) as f:
+            lines = [
+                l for l in f.read().splitlines()
+                if not l.startswith('RIOB18.IOB_Y1.IBUF_HP_BANK_GLUE ')
+            ]
+        with open(segbits, 'w') as f:
+            f.write('\n'.join(lines + [row]) + '\n')
+        return db
+
+    def test_injected_glue_landing_in_another_tile_is_refused(self):
+        db = self.with_glue_row('RIOB18.IOB_Y1.IBUF_HP_BANK_GLUE 29_141')
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write('RIOB18_X95Y47.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN\n')
+            fin.flush()
+            with self.assertRaisesRegex(fasm_assembler.FasmCrossTileWrite,
+                                        'RIOB18_SING_X95Y49'):
+                fasm2frames.run(db, self.PART, fin.name, StringIO(),
+                                sparse=True)
+
+    def test_injected_glue_inside_its_tile_is_written(self):
+        db = self.with_glue_row('RIOB18.IOB_Y1.IBUF_HP_BANK_GLUE 29_109')
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write('RIOB18_X95Y47.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN\n')
+            fin.flush()
+            fout = StringIO()
+            fasm2frames.run(db, self.PART, fin.name, fout, sparse=True)
+        self.assertIn((self.IO_COLUMN + 29, 98, 13), frm2bits(fout.getvalue()))
 
     def test_hp_output_column_glue_lands_in_the_iob_tile(self):
         bits = frm2bits(self.run_fasm(self.HP_OUTPUT))

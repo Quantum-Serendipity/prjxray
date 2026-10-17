@@ -427,6 +427,8 @@ def run(
         def inject_glue(line):
             try:
                 assembler.add_fasm_line(line, glue_missing)
+            except fasm_assembler.FasmCrossTileWrite:
+                raise
             except fasm_assembler.FasmTileWindowViolation as e:
                 glue_missing.append(str(e))
 
@@ -608,6 +610,9 @@ def run(
                 feature = '{}.HCLK_LEAF_BUFRCLK{}_ACTIVE'.format(hclkl_tile, ch)
                 for line in fasm.parse_fasm_string(feature):
                     inject_glue(line)
+
+        for skipped in glue_missing:
+            eprint('WARNING: injected glue not written: {}'.format(skipped))
 
     frames = assembler.get_frames(sparse=sparse)
 

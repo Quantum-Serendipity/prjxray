@@ -35,6 +35,10 @@ class FasmTileWindowViolation(Exception):
     pass
 
 
+class FasmCrossTileWrite(FasmTileWindowViolation):
+    pass
+
+
 class FasmRoiViolation(Exception):
     """Raised in strict-ROI mode when the emitted frame set would leave the ROI.
 
@@ -67,16 +71,15 @@ def bit_in_tile_window(bits, bit):
 
 
 def check_bit_in_tile_window(
-        tile, bits, block_type, bit, line, allowed_hosts=()):
+        tile, bits, block_type, bit, line, allowed_hosts=(), landing=()):
     if not bit.isset or bit_in_tile_window(bits, bit):
         return
 
     word = bit.word_bit // bitstream.WORD_SIZE_BITS
-    raise FasmTileWindowViolation(
+    raise (FasmCrossTileWrite if landing else FasmTileWindowViolation)(
         "FASM line '{}' resolves to frame 0x{:08X} word {} bit {}, outside "
         "tile {}'s own {} window (frames 0x{:08X}..0x{:08X}, words {}..{}){}; "
-        "the bit would land in another tile's words or past the end of the "
-        "frame".format(
+        "{}".format(
             line, bit.word_column, word, bit.word_bit %
             bitstream.WORD_SIZE_BITS, tile, block_type.value
             if hasattr(block_type, 'value') else block_type,
@@ -84,7 +87,11 @@ def check_bit_in_tile_window(
             bits.offset, bits.offset + bits.words - 1,
             ' and outside every tile of the type(s) it is declared to cross '
             'into ({})'.format(', '.join(allowed_hosts))
-            if allowed_hosts else ''))
+            if allowed_hosts else '',
+            'the bit would land in tile {}'.format(', '.join(landing))
+            if landing else
+            'the bit lands in no tile: its word is past the end of the frame '
+            'or in words no tile owns'))
 
 
 def feature_assignment(set_feature):
@@ -365,7 +372,8 @@ class FasmAssembler(object):
                 host = self.cross_tile_host(allowed_hosts, block_type, bit)
                 if host is None:
                     check_bit_in_tile_window(
-                        tile, bits, block_type, bit, line, allowed_hosts)
+                        tile, bits, block_type, bit, line, allowed_hosts,
+                        self.tiles_landed_in(tile, block_type, bit))
                 host_bits.append(self.grid.gridinfo_at_tilename(host).bits[
                     block_type])
                 written.append(bit)
@@ -379,6 +387,15 @@ class FasmAssembler(object):
             for frame in range(bits.base_address,
                                bits.base_address + bits.frames):
                 self.frames_in_use.add(frame)
+
+    def tiles_landed_in(self, tile, block_type, bit):
+        return [
+            '{} ({})'.format(
+                other, self.grid.gridinfo_at_tilename(other).tile_type)
+            for other in self.grid.tiles_containing(
+                block_type, bit.word_column,
+                bit.word_bit // bitstream.WORD_SIZE_BITS) if other != tile
+        ]
 
     def cross_tile_host(self, allowed_hosts, block_type, bit):
         if not allowed_hosts:
