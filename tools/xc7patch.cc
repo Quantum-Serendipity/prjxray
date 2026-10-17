@@ -7,6 +7,7 @@
  *
  * SPDX-License-Identifier: ISC
  */
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <type_traits>
@@ -105,6 +106,8 @@ struct BitstreamPatcher {
 
 		using ConfRegType = typename ArchType::ConfRegType;
 		bool base_writes_crc = false;
+		bool base_writes_mfwr = false;
+		absl::optional<uint32_t> base_cor0;
 		absl::optional<uint32_t> base_cor1;
 		for (const auto& packet : *bitstream_reader) {
 			if (packet.opcode() != xilinx::ConfigurationPacket<
@@ -112,15 +115,58 @@ struct BitstreamPatcher {
 				continue;
 			if (packet.address() == ConfRegType::CRC)
 				base_writes_crc = true;
+			else if (packet.address() == ConfRegType::MFWR)
+				base_writes_mfwr = true;
+			else if (std::is_same<
+			             ConfRegType,
+			             xilinx::Series7ConfigurationRegister>::
+			             value &&
+			         static_cast<unsigned int>(packet.address()) ==
+			             static_cast<unsigned int>(
+			                 xilinx::Series7ConfigurationRegister::
+			                     COR0) &&
+			         !packet.data().empty() && !base_cor0)
+				base_cor0 = packet.data()[0];
 			else if (packet.address() == ConfRegType::COR1 &&
 			         !packet.data().empty())
 				base_cor1 = packet.data()[0];
 		}
 		xilinx::FullStreamOptions options;
 		if (std::is_same<ArchType, xilinx::Series7>::value) {
+			if (base_writes_mfwr) {
+				std::cerr
+				    << FLAGS_bitstream_file
+				    << " writes MFWR, so it is a compressed "
+				       "stream, and this tool re-emits an "
+				       "uncompressed one. Refusing."
+				    << std::endl;
+				return 1;
+			}
+			if (base_cor0 &&
+			    *base_cor0 != xilinx::Series7FullStreamCor0()) {
+				std::cerr
+				    << FLAGS_bitstream_file << " writes COR0 0x"
+				    << std::hex << std::setw(8)
+				    << std::setfill('0') << *base_cor0
+				    << " and this tool emits 0x" << std::setw(8)
+				    << xilinx::Series7FullStreamCor0()
+				    << std::dec
+				    << ". Patching it would change COR0. "
+				       "Refusing."
+				    << std::endl;
+				return 1;
+			}
 			options.emit_crc = base_writes_crc;
 			if (base_cor1 && *base_cor1 != 0)
 				options.cor1 = base_cor1;
+		} else if (base_cor1) {
+			std::cerr
+			    << FLAGS_bitstream_file
+			    << " writes COR1, which this tool carries for "
+			       "Series7 only. Patching it would drop that "
+			       "write's value. Refusing."
+			    << std::endl;
+			return 1;
 		} else if (base_writes_crc) {
 			std::cerr << FLAGS_bitstream_file
 			          << " writes the CRC register, and the stream "

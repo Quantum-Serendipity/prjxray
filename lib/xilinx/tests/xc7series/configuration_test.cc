@@ -585,6 +585,34 @@ TEST(ConfigurationTest, PartialFrameSetCheckRejectsALeak) {
 	             std::runtime_error);
 }
 
+TEST(ConfigurationTest, PartialFrameSetCheckRefusesAWrongPayload) {
+	auto part = absl::optional<xc7series::Part>(MakeTestPart());
+	auto statics = StaticOverTestPart();
+	Frames<Series7>::Frames2Data frames;
+	for (int m = 0; m < 2; ++m)
+		AddFrame(&frames,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x44);
+	auto blocks = Configuration<Series7>::createPartialPacketData(
+	    frames, statics, part, 0);
+	ASSERT_EQ(Configuration<Series7>::checkPartialFrameSet(
+	              blocks, frames, statics, part, 0),
+	          2u);
+
+	auto corrupted = blocks;
+	corrupted[0].second[101 + 7] ^= 0x10;
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(
+	                 corrupted, frames, statics, part, 0),
+	             std::runtime_error);
+
+	Frames<Series7>::Frames2Data pass1;
+	for (int m = 0; m < 2; ++m)
+		AddFrame(&pass1,
+		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0x04);
+	EXPECT_THROW(Configuration<Series7>::checkPartialFrameSet(
+	                 blocks, pass1, statics, part, 0),
+	             std::runtime_error);
+}
+
 // THE FLUSH FRAME. The device commits N-1 of the N frames shifted into an FDRI
 // burst and discards the pending one at the next FAR write -- measured by ICAP
 // at N = 2, 3 and 4 on two independent instruments

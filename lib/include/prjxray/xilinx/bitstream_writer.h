@@ -205,14 +205,24 @@ int BitstreamWriter<ArchType>::writeBitstream(
 		}
 	}
 
-	if (raw)
-		return 0;
+	if (!raw) {
+		std::ofstream::pos_type end_of_data_pos = out_file.tellp();
+		if (end_of_data_pos == std::ofstream::pos_type(-1)) {
+			std::cerr << "Failed to write " << output_file
+			          << std::endl;
+			return 1;
+		}
+		uint32_t length_of_data = end_of_data_pos - end_of_header_pos;
 
-	uint32_t length_of_data = out_file.tellp() - end_of_header_pos;
-
-	out_file.seekp(header_data_length_pos);
-	for (int byte = 3; byte >= 0; byte--) {
-		out_file.put((length_of_data >> (byte * 8)) & 0xFF);
+		out_file.seekp(header_data_length_pos);
+		for (int byte = 3; byte >= 0; byte--) {
+			out_file.put((length_of_data >> (byte * 8)) & 0xFF);
+		}
+	}
+	out_file.close();
+	if (out_file.fail()) {
+		std::cerr << "Failed to write " << output_file << std::endl;
+		return 1;
 	}
 	return 0;
 }

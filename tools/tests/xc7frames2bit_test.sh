@@ -7,14 +7,22 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 failures=0
 
+DATA=$(dirname "$PART")
+
 frm() {
-	local out=$1 a w
+	local out=$1 a
 	shift
+	frm_fill "$out" 0x00000001 "$@"
+}
+
+frm_fill() {
+	local out=$1 fill=$2 a w
+	shift 2
 	: > "$out"
 	for a in "$@"; do
 		printf '0x%08x ' "$a" >> "$out"
-		for w in $(seq 1 100); do printf '0x00000001,' >> "$out"; done
-		printf '0x00000001\n' >> "$out"
+		for w in $(seq 1 100); do printf '%s,' "$fill" >> "$out"; done
+		printf '%s\n' "$fill" >> "$out"
 	done
 }
 
@@ -91,5 +99,78 @@ else
 	echo "FAIL help: --partial_bitstream does not name the flush frame"
 	failures=$((failures + 1))
 fi
+
+logged() {
+	local name=$1 phrase=$2
+	if tr -s ' \n' ' ' < "$tmp/$name.log" | grep -qF "$phrase"; then
+		echo "ok   $name: says '$phrase'"
+	else
+		echo "FAIL $name: does not say '$phrase'"
+		cat "$tmp/$name.log"
+		failures=$((failures + 1))
+	fi
+}
+
+run full-devfull-noverify refuse "${full[@]}" --noverify \
+	--output_file /dev/full
+run midrow-raw-devfull-noverify refuse "${midrow[@]}" --noverify \
+	--output_file /dev/full
+
+frm_fill "$tmp/rm.frm" 0xffffffff 0x0 0x1 0x2
+frm_fill "$tmp/static.frm" 0x00000010 0x0 0x1 0x2 0x3
+frm_fill "$tmp/static-short.frm" 0x00000010 0x0 0x2 0x3
+prepass=(--partial_bitstream --frm_file "$tmp/rm.frm"
+	--tilegrid "$DATA/prepass_tilegrid.json" --db_root "$DATA/prepass_db")
+run prepass-on-nostatic refuse "${prepass[@]}" --prepass on
+logged prepass-on-nostatic "needs --static_frames"
+run prepass-on accept "${prepass[@]}" --prepass on \
+	--static_frames "$tmp/static.frm"
+logged prepass-on "independent replay OK, 3 frames committed 2 time(s) each"
+run prepass-on-static-missing-frame refuse "${prepass[@]}" --prepass on \
+	--static_frames "$tmp/static-short.frm"
+logged prepass-on-static-missing-frame "needs the static's own frame"
+
+sed 's/"baseaddr": "0x00000200"/"baseaddr": "0x00060000"/' \
+	"$DATA/prepass_tilegrid.json" > "$tmp/foreign_tilegrid.json"
+if cmp -s "$DATA/prepass_tilegrid.json" "$tmp/foreign_tilegrid.json"; then
+	echo "FAIL foreign-tilegrid: the fixture edit changed nothing"
+	failures=$((failures + 1))
+fi
+run prepass-foreign-tilegrid refuse --partial_bitstream \
+	--frm_file "$tmp/rm.frm" --prepass on --static_frames "$tmp/static.frm" \
+	--tilegrid "$tmp/foreign_tilegrid.json" --db_root "$DATA/prepass_db"
+logged prepass-foreign-tilegrid "describe different devices"
+
+fam=$tmp/db/fam
+mkdir -p "$fam/mapping" "$fam/parta" "$fam/fabrica" "$fam/fabricb"
+cp "$DATA"/prepass_db/*.db "$fam/"
+cp "$PART" "$fam/parta/part.yaml"
+cp "$DATA/prepass_tilegrid.json" "$fam/fabrica/tilegrid.json"
+cp "$DATA/prepass_tilegrid.json" "$fam/fabricb/tilegrid.json"
+printf 'parta:\n  device: deva\npartb:\n  device: devb\n' \
+	> "$fam/mapping/parts.yaml"
+printf 'deva:\n  fabric: fabrica\ndevb:\n  fabric: fabricb\n' \
+	> "$fam/mapping/devices.yaml"
+byname=(--partial_bitstream --frm_file "$tmp/rm.frm" --prepass on
+	--static_frames "$tmp/static.frm" --part_file "$fam/parta/part.yaml")
+run prepass-part-name-matches accept "${byname[@]}" --part_name parta
+logged prepass-part-name-matches "fabrica/tilegrid.json"
+run prepass-part-name-other-fabric refuse "${byname[@]}" --part_name partb
+logged prepass-part-name-other-fabric "resolves to fabric fabricb"
+
+run full-uncompressed accept "${full[@]}"
+cp "$tmp/out.bit" "$tmp/uncompressed.bit"
+run full-compress accept "${full[@]}" --compress
+logged full-compress "independent replay OK"
+if [[ -f $tmp/out.bit && -f $tmp/uncompressed.bit ]] &&
+   [[ $(stat -c %s "$tmp/out.bit") -lt $(stat -c %s "$tmp/uncompressed.bit") ]]; then
+	echo "ok   full-compress: shorter than the uncompressed stream"
+else
+	echo "FAIL full-compress: not shorter than the uncompressed stream"
+	failures=$((failures + 1))
+fi
+run compress-partial refuse "${partial[@]}" --compress
+run compress-ultrascale refuse "${full[@]}" --compress \
+	--architecture UltraScale
 
 [[ $failures -eq 0 ]]

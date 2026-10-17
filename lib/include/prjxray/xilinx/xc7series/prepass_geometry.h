@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <prjxray/xilinx/xc7series/frame_address.h>
+#include <prjxray/xilinx/xc7series/part.h>
 
 namespace prjxray {
 namespace xilinx {
@@ -116,6 +117,13 @@ class PrePassGeometry {
 	    std::string* error);
 
 	// Cached; the caller may hold the reference until the next call.
+	static bool FabricForPart(const std::string& db_root,
+	                          const std::string& part,
+	                          std::string* fabric,
+	                          std::string* error);
+
+	std::vector<uint32_t> ColumnsNotInPart(const Part& part) const;
+
 	const FrameMasks& MasksFor(const FrameAddress& address) const;
 
 	// One line for stderr: what was loaded and from where. A geometry that

@@ -848,6 +848,24 @@ size_t Configuration<Series7>::checkCompressedFrameSet(
 	return written.size();
 }
 
+uint32_t Series7FullStreamCor0() {
+	return xc7series::ConfigurationOptions0Value()
+	    .SetAddPipelineStageForDoneIn(true)
+	    .SetReleaseDonePinAtStartupCycle(
+	        xc7series::ConfigurationOptions0Value::SignalReleaseCycle::
+	            Phase4)
+	    .SetStallAtStartupCycleUntilDciMatch(
+	        xc7series::ConfigurationOptions0Value::StallCycle::NoWait)
+	    .SetStallAtStartupCycleUntilMmcmLock(
+	        xc7series::ConfigurationOptions0Value::StallCycle::NoWait)
+	    .SetReleaseGtsSignalAtStartupCycle(
+	        xc7series::ConfigurationOptions0Value::SignalReleaseCycle::
+	            Phase5)
+	    .SetReleaseGweSignalAtStartupCycle(
+	        xc7series::ConfigurationOptions0Value::SignalReleaseCycle::
+	            Phase6);
+}
+
 template <>
 void Configuration<Series7>::createConfigurationPackage(
     Series7::ConfigurationPackage& out_packets,
@@ -933,25 +951,10 @@ void Configuration<Series7>::createConfigurationPackage(
 	        ConfigurationRegister::UNKNOWN, {0x0}));
 
 	// Configuration Options 0
-	out_packets.emplace_back(new ConfigurationPacketWithPayload<
-	                         1, ConfigurationRegister>(
-	    ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
-	    ConfigurationRegister::COR0,
-	    {xc7series::ConfigurationOptions0Value()
-	         .SetAddPipelineStageForDoneIn(true)
-	         .SetReleaseDonePinAtStartupCycle(
-	             xc7series::ConfigurationOptions0Value::SignalReleaseCycle::
-	                 Phase4)
-	         .SetStallAtStartupCycleUntilDciMatch(
-	             xc7series::ConfigurationOptions0Value::StallCycle::NoWait)
-	         .SetStallAtStartupCycleUntilMmcmLock(
-	             xc7series::ConfigurationOptions0Value::StallCycle::NoWait)
-	         .SetReleaseGtsSignalAtStartupCycle(
-	             xc7series::ConfigurationOptions0Value::SignalReleaseCycle::
-	                 Phase5)
-	         .SetReleaseGweSignalAtStartupCycle(
-	             xc7series::ConfigurationOptions0Value::SignalReleaseCycle::
-	                 Phase6)}));
+	out_packets.emplace_back(
+	    new ConfigurationPacketWithPayload<1, ConfigurationRegister>(
+	        ConfigurationPacket<ConfigurationRegister>::Opcode::Write,
+	        ConfigurationRegister::COR0, {Series7FullStreamCor0()}));
 
 	// Configuration Options 1. 0x00000000 unless the caller asked for
 	// something else: that is every documented COR1 field at its documented

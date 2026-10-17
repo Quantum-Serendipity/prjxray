@@ -25,6 +25,7 @@ add_library(libprjxray
 	xilinx/xc7series/configuration_column.cc
 	xilinx/xc7series/ecc.cc
 	xilinx/xc7series/prepass_geometry.cc
+	xilinx/xc7series/stream_replay.cc
 )
 target_compile_options(libprjxray PUBLIC "-Wno-deprecated")
 target_include_directories(libprjxray PUBLIC "include")
@@ -68,6 +69,7 @@ if (PRJXRAY_BUILD_TESTING)
 		xilinx/tests/xc7series/part_test.cc
 		xilinx/tests/xc7series/prepass_geometry_test.cc
 		xilinx/tests/xc7series/row_test.cc
+		xilinx/tests/xc7series/stream_replay_test.cc
 		xilinx/tests/xc7series/frames_test.cc)
 	target_link_libraries(xilinx_xc7series_test libprjxray gtest_main)
 	add_test(NAME xilinx_xc7series_test
