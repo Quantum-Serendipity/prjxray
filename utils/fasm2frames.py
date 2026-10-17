@@ -622,12 +622,24 @@ def run(
     dump_frm(f_out, frames)
 
 
+def xc7dpr_revision():
+    try:
+        from prjxray.xc7dpr_revision import REVISION
+    except ImportError:
+        return 'unknown'
+    return REVISION
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=
         'Convert FPGA configuration description ("FPGA assembly") into binary frame equivalent'
     )
 
+    parser.add_argument(
+        '--version',
+        action='version',
+        version='fasm2frames xc7dpr ' + xc7dpr_revision())
     util.db_root_arg(parser)
     util.part_arg(parser)
     parser.add_argument(
