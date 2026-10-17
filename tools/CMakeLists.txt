@@ -33,6 +33,8 @@ target_link_libraries(xc7frames2bit
 	gflags
 	libprjxray
 )
+set(XC7DPR_PRJXRAY_REV "unknown" CACHE STRING "prjxray fork revision reported by xc7frames2bit --version")
+target_compile_definitions(xc7frames2bit PRIVATE XC7DPR_PRJXRAY_REV="${XC7DPR_PRJXRAY_REV}")
 
 add_subdirectory(bits2rbt)
 
@@ -41,6 +43,10 @@ if(PRJXRAY_BUILD_TESTING)
 		COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/xc7frames2bit_test.sh
 			$<TARGET_FILE:xc7frames2bit>
 			${PROJECT_SOURCE_DIR}/lib/test_data/configuration_test.yaml)
+	add_test(NAME xc7frames2bit_version_test
+		COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/xc7frames2bit_version_test.sh
+			$<TARGET_FILE:xc7frames2bit>
+			${XC7DPR_PRJXRAY_REV})
 	add_test(NAME xc7patch_test
 		COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/xc7patch_test.sh
 			$<TARGET_FILE:xc7frames2bit>

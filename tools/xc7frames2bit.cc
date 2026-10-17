@@ -948,6 +948,7 @@ struct Frames2BitWriter {
 
 int main(int argc, char* argv[]) {
 	gflags::SetUsageMessage(argv[0]);
+	gflags::SetVersionString("xc7dpr " XC7DPR_PRJXRAY_REV);
 	gflags::ParseCommandLineFlags(&argc, &argv, true);
 	// A flag that silently does nothing is a check that never runs. --crc
 	// steers the partial path and --emit_crc steers the full one; asking
