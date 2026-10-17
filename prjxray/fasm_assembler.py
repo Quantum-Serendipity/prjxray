@@ -12,6 +12,7 @@ import fasm
 import sys
 
 from prjxray import bitstream
+from prjxray import cross_tile_features
 
 
 class FasmLookupError(Exception):
@@ -31,6 +32,10 @@ class FasmFeatureConflict(Exception):
 class FasmTileWindowViolation(Exception):
     """Raised when a feature resolves to a bit outside its own tile's frames
     or words, i.e. a bit that belongs to another tile."""
+    pass
+
+
+class FasmCrossTileWrite(FasmTileWindowViolation):
     pass
 
 
@@ -58,26 +63,35 @@ class FasmRoiViolation(Exception):
 _ROI_VIOLATION_REPORT_LIMIT = 20
 
 
-def check_bit_in_tile_window(tile, bits, block_type, bit, line):
-    '''Raise FasmTileWindowViolation unless bit lies in the tile's own frames
-    and words for block_type.'''
+def bit_in_tile_window(bits, bit):
     word = bit.word_bit // bitstream.WORD_SIZE_BITS
-    frame_ok = bits.base_address <= bit.word_column < (
-        bits.base_address + bits.frames)
-    word_ok = bits.offset <= word < bits.offset + bits.words
-    if frame_ok and word_ok:
+    return (
+        bits.base_address <= bit.word_column < bits.base_address + bits.frames
+        and bits.offset <= word < bits.offset + bits.words)
+
+
+def check_bit_in_tile_window(
+        tile, bits, block_type, bit, line, allowed_hosts=(), landing=()):
+    if not bit.isset or bit_in_tile_window(bits, bit):
         return
 
-    raise FasmTileWindowViolation(
+    word = bit.word_bit // bitstream.WORD_SIZE_BITS
+    raise (FasmCrossTileWrite if landing else FasmTileWindowViolation)(
         "FASM line '{}' resolves to frame 0x{:08X} word {} bit {}, outside "
-        "tile {}'s own {} window (frames 0x{:08X}..0x{:08X}, words {}..{}); "
-        "the bit would land in another tile's words or past the end of the "
-        "frame".format(
+        "tile {}'s own {} window (frames 0x{:08X}..0x{:08X}, words {}..{}){}; "
+        "{}".format(
             line, bit.word_column, word, bit.word_bit %
             bitstream.WORD_SIZE_BITS, tile, block_type.value
             if hasattr(block_type, 'value') else block_type,
             bits.base_address, bits.base_address + bits.frames - 1,
-            bits.offset, bits.offset + bits.words - 1))
+            bits.offset, bits.offset + bits.words - 1,
+            ' and outside every tile of the type(s) it is declared to cross '
+            'into ({})'.format(', '.join(allowed_hosts))
+            if allowed_hosts else '',
+            'the bit would land in tile {}'.format(', '.join(landing))
+            if landing else
+            'the bit lands in no tile: its word is past the end of the frame '
+            'or in words no tile owns'))
 
 
 def feature_assignment(set_feature):
@@ -346,20 +360,53 @@ class FasmAssembler(object):
                 "Segment DB %s, key %s not found from line '%s'" %
                 (gridinfo.tile_type, db_k, line))
 
+        allowed_hosts = cross_tile_features.ALLOWED.get(
+            (gridinfo.tile_type, feature), ())
+        written = []
+        host_bits = []
         for block_type, bit in feature_bits:
-            check_bit_in_tile_window(tile, gridinfo.bits[block_type],
-                                     block_type, bit, line)
-
-        for block_type, bit in feature_bits:
+            bits = gridinfo.bits[block_type]
+            if bit_in_tile_window(bits, bit):
+                written.append(bit)
+            elif bit.isset:
+                host = self.cross_tile_host(allowed_hosts, block_type, bit)
+                if host is None:
+                    check_bit_in_tile_window(
+                        tile, bits, block_type, bit, line, allowed_hosts,
+                        self.tiles_landed_in(tile, block_type, bit))
+                host_bits.append(self.grid.gridinfo_at_tilename(host).bits[
+                    block_type])
+                written.append(bit)
             any_bits.add(block_type)
+
+        for bit in written:
             update_segbit(bit)
 
-        for block_type in any_bits:
-            # Mark all frames used by this tile as in use.
-            bits = gridinfo.bits[block_type]
+        in_use = [gridinfo.bits[block_type] for block_type in any_bits]
+        for bits in in_use + host_bits:
             for frame in range(bits.base_address,
                                bits.base_address + bits.frames):
                 self.frames_in_use.add(frame)
+
+    def tiles_landed_in(self, tile, block_type, bit):
+        return [
+            '{} ({})'.format(
+                other, self.grid.gridinfo_at_tilename(other).tile_type)
+            for other in self.grid.tiles_containing(
+                block_type, bit.word_column,
+                bit.word_bit // bitstream.WORD_SIZE_BITS) if other != tile
+        ]
+
+    def cross_tile_host(self, allowed_hosts, block_type, bit):
+        if not allowed_hosts:
+            return None
+        for host in self.grid.tiles_containing(
+                block_type, bit.word_column,
+                bit.word_bit // bitstream.WORD_SIZE_BITS):
+            if self.grid.gridinfo_at_tilename(
+                    host).tile_type in allowed_hosts:
+                return host
+        return None
 
     def record_feature_assignment(self, set_feature):
         mask, value = feature_assignment(set_feature)

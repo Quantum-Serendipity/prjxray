@@ -1,0 +1,200 @@
+{
+  "CLBLM_R_X93Y1": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "baseaddr": "0x00442E80",
+        "frames": 36,
+        "offset": 2,
+        "words": 2
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 226,
+    "grid_y": 362,
+    "pin_functions": {},
+    "prohibited_sites": [],
+    "sites": {
+      "SLICE_X152Y1": "SLICEM",
+      "SLICE_X153Y1": "SLICEL"
+    },
+    "type": "CLBLM_R"
+  },
+  "INT_R_X93Y1": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "baseaddr": "0x00442E80",
+        "frames": 28,
+        "offset": 2,
+        "words": 2
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 225,
+    "grid_y": 362,
+    "pin_functions": {},
+    "prohibited_sites": [],
+    "sites": {
+      "TIEOFF_X99Y1": "TIEOFF"
+    },
+    "type": "INT_R"
+  },
+  "INT_R_X95Y0": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "baseaddr": "0x00442F80",
+        "frames": 28,
+        "offset": 0,
+        "words": 2
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 232,
+    "grid_y": 363,
+    "pin_functions": {},
+    "prohibited_sites": [],
+    "sites": {
+      "TIEOFF_X101Y0": "TIEOFF"
+    },
+    "type": "INT_R"
+  },
+  "INT_R_X95Y1": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "baseaddr": "0x00442F80",
+        "frames": 28,
+        "offset": 2,
+        "words": 2
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 232,
+    "grid_y": 362,
+    "pin_functions": {},
+    "prohibited_sites": [],
+    "sites": {
+      "TIEOFF_X101Y1": "TIEOFF"
+    },
+    "type": "INT_R"
+  },
+  "INT_R_X95Y49": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "baseaddr": "0x00442F80",
+        "frames": 28,
+        "offset": 99,
+        "words": 2
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 232,
+    "grid_y": 313,
+    "pin_functions": {},
+    "prohibited_sites": [],
+    "sites": {
+      "TIEOFF_X101Y49": "TIEOFF"
+    },
+    "type": "INT_R"
+  },
+  "RIOB18_SING_X95Y0": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "alias": {
+          "sites": {
+            "IOB33_Y0": "IOB33_Y0"
+          },
+          "start_offset": 2,
+          "type": "RIOB18"
+        },
+        "baseaddr": "0x00442F80",
+        "frames": 42,
+        "offset": 0,
+        "words": 2
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 236,
+    "grid_y": 363,
+    "pin_functions": {
+      "IOB_X1Y0": "IO_25_VRP_32"
+    },
+    "prohibited_sites": [],
+    "sites": {
+      "IOB_X1Y0": "IOB18"
+    },
+    "type": "RIOB18_SING"
+  },
+  "RIOB18_SING_X95Y49": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "alias": {
+          "sites": {
+            "IOB33_Y0": "IOB33_Y1"
+          },
+          "start_offset": 0,
+          "type": "RIOB18"
+        },
+        "baseaddr": "0x00442F80",
+        "frames": 42,
+        "offset": 99,
+        "words": 2
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 236,
+    "grid_y": 313,
+    "pin_functions": {
+      "IOB_X1Y49": "IO_0_VRN_32"
+    },
+    "prohibited_sites": [],
+    "sites": {
+      "IOB_X1Y49": "IOB18"
+    },
+    "type": "RIOB18_SING"
+  },
+  "RIOB18_X95Y1": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "baseaddr": "0x00442F80",
+        "frames": 42,
+        "offset": 2,
+        "words": 4
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 236,
+    "grid_y": 362,
+    "pin_functions": {
+      "IOB_X1Y1": "IO_L24N_T3_32",
+      "IOB_X1Y2": "IO_L24P_T3_32"
+    },
+    "prohibited_sites": [],
+    "sites": {
+      "IOB_X1Y1": "IOB18S",
+      "IOB_X1Y2": "IOB18M"
+    },
+    "type": "RIOB18"
+  },
+  "RIOB18_X95Y47": {
+    "bits": {
+      "CLB_IO_CLK": {
+        "baseaddr": "0x00442F80",
+        "frames": 42,
+        "offset": 95,
+        "words": 4
+      }
+    },
+    "clock_region": "X1Y0",
+    "grid_x": 236,
+    "grid_y": 315,
+    "pin_functions": {
+      "IOB_X1Y47": "IO_L1N_T0_32",
+      "IOB_X1Y48": "IO_L1P_T0_32"
+    },
+    "prohibited_sites": [],
+    "sites": {
+      "IOB_X1Y47": "IOB18S",
+      "IOB_X1Y48": "IOB18M"
+    },
+    "type": "RIOB18"
+  }
+}

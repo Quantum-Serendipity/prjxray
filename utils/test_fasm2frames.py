@@ -10,10 +10,12 @@
 # SPDX-License-Identifier: ISC
 # TODO: need better coverage for different tile types
 
+import contextlib
 from io import StringIO
 import os
 import os.path
 import re
+import shutil
 import sys
 import unittest
 import tempfile
@@ -22,6 +24,7 @@ from unittest import mock
 import prjxray
 import prjxray.grid_types
 import prjxray.tile_segbits
+from prjxray import cross_tile_features
 from prjxray import fasm_assembler
 from prjxray.db import Database
 from prjxray.roi import Roi
@@ -333,6 +336,23 @@ class TestTileWindow(unittest.TestCase):
                 fasm_assembler.check_bit_in_tile_window(
                     'T', bits, 'CLB_IO_CLK', bit, 'line')
 
+    def test_clear_bit_outside_the_tile_is_not_refused(self):
+        bits = prjxray.grid_types.Bits(
+            base_address=0x00400000,
+            frames=42,
+            offset=99,
+            words=2,
+            alias=None)
+        for word_column, word in ((0x00400000 + 38, 98),
+                                  (0x00400000 + 38, 101),
+                                  (0x00400000 + 42, 99)):
+            fasm_assembler.check_bit_in_tile_window(
+                'T', bits, 'CLB_IO_CLK',
+                prjxray.tile_segbits.Bit(
+                    word_column=word_column,
+                    word_bit=word * 32 + 3,
+                    isset=False), 'line')
+
     def test_frame_past_the_tile(self):
         bits = prjxray.grid_types.Bits(
             base_address=0x00400000,
@@ -376,6 +396,147 @@ class TestTileWindow(unittest.TestCase):
                 assembler.enable_feature(tile, 'SLICEM_X0.PAIR', 0, 'line')
         self.assertEqual(assembler.frames, {})
         self.assertEqual(assembler.frames_in_use, set())
+
+
+class TestKintex7HpBank(unittest.TestCase):
+    DB = os.path.join(os.path.dirname(__file__), 'test_data', 'db_kintex7')
+    PART = 'xc7k325tffg900-2'
+    IO_COLUMN = 0x00442F80
+
+    HP_OUTPUT = '\n'.join(
+        (
+            'RIOB18_X95Y1.IOB_Y0.LVCMOS15_LVCMOS18.DRIVE.'
+            'I12_I16_I2_I4_I6_I8',
+            'RIOB18_X95Y1.IOB_Y0.LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW',
+            'RIOB18_X95Y1.IOB_Y0.PULLTYPE.NONE',
+            'INT_R_X95Y1.IOB_COL_BANK_ACTIVE',
+            'INT_R_X95Y1.IOB_COL_OBUF_CASCADE_Y1',
+        ))
+
+    IOB_COL_BITS = {
+        (IO_COLUMN + 38, 2, 12),
+        (IO_COLUMN + 38, 3, 0),
+        (IO_COLUMN + 38, 3, 2),
+        (IO_COLUMN + 30, 3, 9),
+        (IO_COLUMN + 32, 2, 16),
+        (IO_COLUMN + 33, 3, 29),
+    }
+
+    def run_fasm(self, text, sparse=True):
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write(text + '\n')
+            fin.flush()
+            fout = StringIO()
+            fasm2frames.run(self.DB, self.PART, fin.name, fout, sparse=sparse)
+            return fout.getvalue()
+
+    def test_sing_input_whose_clear_bit_is_outside_the_tile(self):
+        frm = self.run_fasm('RIOB18_SING_X95Y0.IOB_Y0.LVCMOS12_LVCMOS15.IN')
+        self.assertEqual(
+            frm2bits(frm), {
+                (self.IO_COLUMN + 38, 1, 30),
+                (self.IO_COLUMN + 39, 1, 31),
+            })
+
+    def test_sing_input_glue_with_no_word_in_the_tile_is_not_injected(self):
+        frm = self.run_fasm(
+            'RIOB18_SING_X95Y49.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN')
+        self.assertEqual(
+            frm2bits(frm), {
+                (self.IO_COLUMN + 38, 99, 0),
+                (self.IO_COLUMN + 39, 99, 1),
+            })
+
+    def test_sing_input_glue_with_no_word_in_the_tile_is_reported(self):
+        err = StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_fasm(
+                'RIOB18_SING_X95Y49.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN')
+        self.assertIn('WARNING: injected glue not written', err.getvalue())
+        self.assertIn(
+            'RIOB18_SING_X95Y49.IOB_Y1.IBUF_HP_BANK_GLUE', err.getvalue())
+        self.assertIn('lands in no tile', err.getvalue())
+
+    def with_glue_row(self, row):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = os.path.join(d, 'db')
+        shutil.copytree(self.DB, db)
+        segbits = os.path.join(db, 'segbits_riob18.db')
+        with open(segbits) as f:
+            lines = [
+                l for l in f.read().splitlines()
+                if not l.startswith('RIOB18.IOB_Y1.IBUF_HP_BANK_GLUE ')
+            ]
+        with open(segbits, 'w') as f:
+            f.write('\n'.join(lines + [row]) + '\n')
+        return db
+
+    def test_injected_glue_landing_in_another_tile_is_refused(self):
+        db = self.with_glue_row('RIOB18.IOB_Y1.IBUF_HP_BANK_GLUE 29_141')
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write('RIOB18_X95Y47.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN\n')
+            fin.flush()
+            with self.assertRaisesRegex(fasm_assembler.FasmCrossTileWrite,
+                                        'RIOB18_SING_X95Y49'):
+                fasm2frames.run(db, self.PART, fin.name, StringIO(),
+                                sparse=True)
+
+    def test_injected_glue_inside_its_tile_is_written(self):
+        db = self.with_glue_row('RIOB18.IOB_Y1.IBUF_HP_BANK_GLUE 29_109')
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write('RIOB18_X95Y47.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN\n')
+            fin.flush()
+            fout = StringIO()
+            fasm2frames.run(db, self.PART, fin.name, fout, sparse=True)
+        self.assertIn((self.IO_COLUMN + 29, 98, 13), frm2bits(fout.getvalue()))
+
+    def test_hp_output_column_glue_lands_in_the_iob_tile(self):
+        bits = frm2bits(self.run_fasm(self.HP_OUTPUT))
+        self.assertTrue(self.IOB_COL_BITS <= bits, self.IOB_COL_BITS - bits)
+
+    def test_hp_output_exits_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            fn_in = os.path.join(d, 'in.fasm')
+            fn_out = os.path.join(d, 'out.frm')
+            with open(fn_in, 'w') as f:
+                f.write(self.HP_OUTPUT + '\n')
+            argv = [
+                'fasm2frames.py', '--db-root', self.DB, '--part', self.PART,
+                '--sparse', fn_in, fn_out
+            ]
+            with mock.patch.object(sys, 'argv', argv):
+                self.assertEqual(fasm2frames.main(), 0)
+            self.assertTrue(os.path.getsize(fn_out) > 0)
+
+    def test_column_glue_alone_writes_the_host_tiles_frames(self):
+        frm = self.run_fasm('INT_R_X95Y1.IOB_COL_BANK_ACTIVE')
+        frames = {int(l.split(' ')[0], 0) for l in frm.splitlines() if l}
+        self.assertEqual(
+            frames, set(range(self.IO_COLUMN, self.IO_COLUMN + 42)))
+        self.assertEqual(
+            frm2bits(frm), {
+                (self.IO_COLUMN + 38, 2, 12),
+                (self.IO_COLUMN + 38, 3, 0),
+                (self.IO_COLUMN + 38, 3, 2),
+            })
+
+    def test_column_glue_is_refused_without_its_declaration(self):
+        with mock.patch.dict(cross_tile_features.ALLOWED, clear=True):
+            with self.assertRaises(fasm_assembler.FasmTileWindowViolation):
+                self.run_fasm(self.HP_OUTPUT)
+
+    def test_column_glue_in_a_clb_column_is_refused(self):
+        for feature in ('IOB_COL_BANK_ACTIVE', 'IOB_COL_OBUF_CASCADE_Y1'):
+            with self.subTest(feature=feature):
+                with self.assertRaises(
+                        fasm_assembler.FasmTileWindowViolation):
+                    self.run_fasm('INT_R_X93Y1.' + feature)
+
+    def test_sing_absent_site_set_bit_is_still_refused(self):
+        with self.assertRaises(fasm_assembler.FasmTileWindowViolation):
+            self.run_fasm(
+                'RIOB18_SING_X95Y0.IOB_Y1.LVCMOS12_LVCMOS15_LVCMOS18.IN')
 
 
 class TestFeatureConflict(unittest.TestCase):
