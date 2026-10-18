@@ -85,6 +85,17 @@ def required_features(db_root, family):
     return out
 
 
+def read_require_file(fn):
+    with open(fn) as f:
+        tags = [line.strip() for line in f if line.strip()]
+    if not tags:
+        raise ValueError('%s names no tag' % fn)
+    for tag in tags:
+        if '.' not in tag or len(tag.split()) != 1:
+            raise ValueError('%s: malformed tag %r' % (fn, tag))
+    return tags
+
+
 def run(db_root, families, require, out=None):
     if out is None:
         out = sys.stdout
@@ -135,8 +146,16 @@ def main(argv=None):
         action='append',
         default=[],
         help='<TILE_TYPE>.<feature> that every family must carry')
+    parser.add_argument(
+        '--require-file',
+        action='append',
+        default=[],
+        help='file of --require tags, one per line')
     args = parser.parse_args(argv)
     try:
+        require = list(args.require)
+        for fn in args.require_file:
+            require += read_require_file(fn)
         families = args.family or families_in(args.db_root)
         if not families:
             print(
@@ -144,7 +163,7 @@ def main(argv=None):
                 args.db_root,
                 file=sys.stderr)
             return 2
-        problems, checked = run(args.db_root, families, args.require)
+        problems, checked = run(args.db_root, families, require)
     except (OSError, ValueError, AssertionError) as e:
         print('family-census: no verdict, %s' % e, file=sys.stderr)
         return 2
