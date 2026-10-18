@@ -119,37 +119,75 @@ class TestStrictDuplicates(unittest.TestCase):
         self.rejects((SPELLINGS[0], SPELLINGS[0]), aliases)
 
 class TestOriginInfoSummary(unittest.TestCase):
-    def summary(self, files, drift_fatal=False):
-        with tempfile.TemporaryDirectory() as d:
+    def summary(self, files, subdir='', **kwargs):
+        with tempfile.TemporaryDirectory() as top:
+            d = os.path.join(top, subdir)
+            os.makedirs(d, exist_ok=True)
             for name, text in files.items():
                 with open(os.path.join(d, name), 'w') as f:
                     f.write(text)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                checkdb.check_origin_info(d, drift_fatal=drift_fatal)
+                checkdb.check_origin_info(d, **kwargs)
             return out.getvalue()
 
-    FILES = {
+    AGREE = {
         'segbits_a.db': 'A.X 01_02\n',
         'segbits_a.origin_info.db': 'A.X origin:f 01_02\n',
-        'segbits_b.db': 'B.X 01_02\nB.Y 01_03\n',
-        'segbits_b.origin_info.db': 'B.X origin:f 01_02\n',
-        'segbits_c.db': 'C.X 01_02\n',
     }
+    DRIFT = dict(
+        AGREE, **{
+            'segbits_b.db': 'B.X 01_02\nB.Y 01_03\n',
+            'segbits_b.origin_info.db': 'B.X origin:f 01_02\n',
+        })
+    UNCOVERED = dict(AGREE, **{'segbits_c.db': 'C.X 01_02\n'})
+    FILES = dict(DRIFT, **UNCOVERED)
 
     def test_drifted_file_is_not_counted_okay(self):
-        out = self.summary(self.FILES)
+        out = self.summary(self.FILES, drift_fatal=False)
         self.assertIn('1 okay, 1 drifted from segbits', out)
-        self.assertIn('non-fatal; pass --origin-drift-fatal', out)
+        self.assertIn('non-fatal under --origin-drift-warn', out)
 
     def test_segbits_without_origin_info_is_counted(self):
-        out = self.summary(self.FILES)
+        out = self.summary(self.FILES, drift_fatal=False)
         self.assertIn('1 segbits file(s) without origin_info', out)
         self.assertIn('segbits_c.db has no origin_info companion', out)
 
-    def test_drift_fatal_still_raises(self):
+    def test_drift_is_fatal_by_default(self):
         with self.assertRaises(AssertionError):
-            self.summary(self.FILES, drift_fatal=True)
+            self.summary(self.DRIFT)
+
+    def test_uncovered_segbits_is_fatal_by_default(self):
+        with self.assertRaises(AssertionError):
+            self.summary(self.UNCOVERED)
+
+    def test_agreeing_db_passes_by_default(self):
+        out = self.summary(self.AGREE)
+        self.assertIn('1 okay, 0 drifted from segbits', out)
+        self.assertNotIn('non-fatal', out)
+
+    def test_db_root_containing_dot_db_is_not_misread(self):
+        out = self.summary(self.AGREE, subdir='x.db/artix7')
+        self.assertIn('0 segbits file(s) without origin_info', out)
+
+    def test_cli_default_is_fatal_and_warn_opts_out(self):
+        argv = ['checkdb.py', '--db-root', 'R', '--part', 'P']
+        seen = []
+
+        def fake_run(db_root, part, origin_drift_fatal, **kwargs):
+            seen.append(origin_drift_fatal)
+
+        saved = (checkdb.run, os.sys.argv)
+        self.addCleanup(
+            lambda: (
+                setattr(checkdb, 'run', saved[0]),
+                setattr(os.sys, 'argv', saved[1])))
+        checkdb.run = fake_run
+        os.sys.argv = argv
+        checkdb.main()
+        os.sys.argv = argv + ['--origin-drift-warn']
+        checkdb.main()
+        self.assertEqual(seen, [True, False])
 
 
 if __name__ == '__main__':
