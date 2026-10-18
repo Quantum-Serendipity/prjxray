@@ -257,7 +257,7 @@ def blind_tags(counts, minimum=1):
     }
 
 
-def main():
+def main(argv=None):
     import argparse
     p = argparse.ArgumentParser(
         description="Report per-tag two-sided support in segmaker output. "
@@ -277,7 +277,7 @@ def main():
         "--warn",
         action="store_true",
         help="report but exit 0 -- for fuzzers with known-blind tags")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     counts = support_from_segdata(args.segdata)
     if not counts:
@@ -287,6 +287,13 @@ def main():
     bad = blind_tags(counts, args.minimum)
     if args.only is not None:
         rx = re.compile(args.only)
+        matched = sorted(t for t in counts if rx.search(t))
+        if not matched:
+            print(
+                "presence: --only %r matches none of the %d tag(s) in %d "
+                "segdata file(s); nothing was graded" %
+                (args.only, len(counts), len(args.segdata)))
+            return 2
         bad = {t: c for t, c in bad.items() if rx.search(t)}
 
     print(
@@ -308,7 +315,12 @@ def main():
             "vary the presence of what they measure, do not add specimens" %
             len(bad))
         return 0 if args.warn else 1
-    print("presence: OK, every tag has two-sided support")
+    if args.only is not None:
+        print(
+            "presence: OK, all %d tag(s) matching %r have two-sided support" %
+            (len(matched), args.only))
+    else:
+        print("presence: OK, every tag has two-sided support")
     return 0
 
 
