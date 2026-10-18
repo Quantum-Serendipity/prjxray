@@ -20,6 +20,8 @@ pairs -- no less (a declared group has to work) and no more (it must not stand
 in for a pair it does not contain).
 """
 
+import contextlib
+import io
 import os
 import tempfile
 import unittest
@@ -115,6 +117,39 @@ class TestStrictDuplicates(unittest.TestCase):
         path, aliases = alias_file(SPELLINGS[:2])
         self.addCleanup(os.unlink, path)
         self.rejects((SPELLINGS[0], SPELLINGS[0]), aliases)
+
+class TestOriginInfoSummary(unittest.TestCase):
+    def summary(self, files, drift_fatal=False):
+        with tempfile.TemporaryDirectory() as d:
+            for name, text in files.items():
+                with open(os.path.join(d, name), 'w') as f:
+                    f.write(text)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                checkdb.check_origin_info(d, drift_fatal=drift_fatal)
+            return out.getvalue()
+
+    FILES = {
+        'segbits_a.db': 'A.X 01_02\n',
+        'segbits_a.origin_info.db': 'A.X origin:f 01_02\n',
+        'segbits_b.db': 'B.X 01_02\nB.Y 01_03\n',
+        'segbits_b.origin_info.db': 'B.X origin:f 01_02\n',
+        'segbits_c.db': 'C.X 01_02\n',
+    }
+
+    def test_drifted_file_is_not_counted_okay(self):
+        out = self.summary(self.FILES)
+        self.assertIn('1 okay, 1 drifted from segbits', out)
+        self.assertIn('non-fatal; pass --origin-drift-fatal', out)
+
+    def test_segbits_without_origin_info_is_counted(self):
+        out = self.summary(self.FILES)
+        self.assertIn('1 segbits file(s) without origin_info', out)
+        self.assertIn('segbits_c.db has no origin_info companion', out)
+
+    def test_drift_fatal_still_raises(self):
+        with self.assertRaises(AssertionError):
+            self.summary(self.FILES, drift_fatal=True)
 
 
 if __name__ == '__main__':

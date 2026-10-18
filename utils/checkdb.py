@@ -209,11 +209,22 @@ def check_origin_info(db_root, verbose=False, aliases=None, drift_fatal=False):
                     os.path.basename(origin_fn), len(only_origin),
                     len(only_segbits), len(differ)))
         files += 1
+    uncovered = [
+        os.path.basename(fn)
+        for fn in sorted(glob.glob('%s/segbits_*.db' % db_root))
+        if not fn.endswith('.origin_info.db')
+        and not os.path.exists(fn.replace('.db', '.origin_info.db'))
+    ]
     for message in drifted:
         print("WARNING: origin_info drift: %s" % message)
+    for fn in uncovered:
+        print("WARNING: %s has no origin_info companion" % fn)
     print(
-        "segbits_*.origin_info.db: %d okay, %d drifted from segbits" %
-        (files, len(drifted)))
+        "segbits_*.origin_info.db: %d okay, %d drifted from segbits%s; "
+        "%d segbits file(s) without origin_info" % (
+            files - len(drifted), len(drifted),
+            " (non-fatal; pass --origin-drift-fatal)"
+            if drifted and not drift_fatal else "", len(uncovered)))
     assert not (drift_fatal and drifted), \
         "%d origin_info file(s) disagree with their segbits file" % len(drifted)
 
