@@ -18,12 +18,28 @@ import sys
 from prjxray import util
 
 
+VARIANT_SUFFIXES = ('_fuji2', '_pele1')
+
+
 def frame_indices(bits):
     return frozenset(int(bit.lstrip('!').split('_')[0]) for bit in bits)
 
 
-def read_segbits(fn):
+def tile_of(fname):
+    assert fname.startswith('segbits_') and fname.endswith('.db'), fname
+    return fname[len('segbits_'):-len('.db')]
+
+
+def canonical_tile(tile):
+    for suffix in VARIANT_SUFFIXES:
+        if tile.endswith(suffix):
+            return tile[:-len(suffix)]
+    return tile
+
+
+def read_segbits(fn, alias=None):
     entries = {}
+    full = {}
     with util.OpenSafeFile(fn) as f:
         for line in f:
             line = line.strip()
@@ -32,6 +48,18 @@ def read_segbits(fn):
             tag, bits, mode, _ = util.parse_db_line(line)
             if bits is None:
                 continue
+            if alias is not None:
+                prefix, _, rest = tag.partition('.')
+                if prefix == alias[0]:
+                    tag = '%s.%s' % (alias[1], rest)
+            bitset = frozenset(bits)
+            if tag in full:
+                if full[tag] != bitset:
+                    raise ValueError(
+                        "%s: tag %s appears twice with different bits" %
+                        (fn, tag))
+                continue
+            full[tag] = bitset
             entries[tag] = frame_indices(bits)
     return entries
 
@@ -59,7 +87,9 @@ def families_in(db_root):
         if glob.glob(os.path.join(db_root, name, 'segbits_*.db')))
 
 
-def run(db_root, families=None, exceptions=frozenset(), out=None):
+def run(
+        db_root, families=None, exceptions=frozenset(), out=None,
+        unused_out=None):
     if out is None:
         out = sys.stdout
     families = families or families_in(db_root)
@@ -68,23 +98,40 @@ def run(db_root, families=None, exceptions=frozenset(), out=None):
         for fn in glob.glob(os.path.join(db_root, family, 'segbits_*.db')):
             if fn.endswith('.origin_info.db'):
                 continue
-            by_file.setdefault(os.path.basename(fn), {})[family] = fn
+            tile = tile_of(os.path.basename(fn))
+            key = 'segbits_%s.db' % canonical_tile(tile)
+            per_family = by_file.setdefault(key, {})
+            if family in per_family:
+                raise ValueError(
+                    "%s: %s and %s both map to %s" % (
+                        family, os.path.basename(per_family[family][0]),
+                        os.path.basename(fn), key))
+            alias = None
+            if canonical_tile(tile) != tile:
+                alias = (tile.upper(), canonical_tile(tile).upper())
+            per_family[family] = (fn, alias)
 
     files = pairs = excused = 0
     violations = []
+    used = set()
     for fname in sorted(by_file):
         per_family = by_file[fname]
         if len(per_family) < 2:
             continue
         files += 1
-        loaded = {fam: read_segbits(fn) for fam, fn in per_family.items()}
+        loaded = {
+            fam: read_segbits(fn, alias)
+            for fam, (fn, alias) in per_family.items()
+        }
         for fam_a, fam_b in itertools.combinations(sorted(loaded), 2):
             a, b = loaded[fam_a], loaded[fam_b]
             for tag in sorted(set(a) & set(b)):
                 pairs += 1
                 if a[tag] == b[tag]:
                     continue
-                if (fname, tag, frozenset((fam_a, fam_b))) in exceptions:
+                key = (fname, tag, frozenset((fam_a, fam_b)))
+                if key in exceptions:
+                    used.add(key)
                     excused += 1
                     continue
                 violations.append(
@@ -94,6 +141,15 @@ def run(db_root, families=None, exceptions=frozenset(), out=None):
 
     for violation in violations:
         print("VIOLATION %s" % violation, file=out)
+    unused = sorted(
+        (fname, tag, sorted(fams))
+        for fname, tag, fams in set(exceptions) - used)
+    for fname, tag, fams in unused:
+        print(
+            "UNUSED EXCEPTION %s %s %s %s" % (fname, tag, fams[0], fams[-1]),
+            file=out)
+    if unused_out is not None:
+        unused_out.extend(unused)
     print(
         "crossfam: %d shared file(s), %d shared tag-pair(s), "
         "%d frame-set violation(s), %d excused" %
@@ -109,7 +165,8 @@ def main():
         "each. Polarity and word offsets are ignored; only the frames are "
         "compared.",
         epilog="Exit status: 0 when every compared tag-pair agrees and at "
-        "least --min-pairs of them agreed; 1 on any frame-set violation; 2 "
+        "least --min-pairs of them agreed; 1 on any frame-set violation or "
+        "unused exception; 2 "
         "when there is no verdict: a usage error, a missing --db-root, an "
         "unreadable or malformed input file, or fewer than --min-pairs "
         "agreeing tag-pairs.")
@@ -125,7 +182,9 @@ def main():
     parser.add_argument(
         '--exceptions',
         help="file of '<file> <tag> <family> <family> <reason>' lines that "
-        'may disagree')
+        'may disagree; <file> and <tag> use the canonical tile name, without '
+        'a family suffix such as %s; a line that excuses nothing is an error'
+        % '/'.join(VARIANT_SUFFIXES))
     parser.add_argument(
         '--min-pairs',
         type=int,
@@ -141,11 +200,13 @@ def main():
     try:
         exceptions = read_exceptions(
             args.exceptions) if args.exceptions else frozenset()
-        violations, agreed = run(args.db_root, args.family, exceptions)
+        unused = []
+        violations, agreed = run(
+            args.db_root, args.family, exceptions, unused_out=unused)
     except (OSError, ValueError, AssertionError) as e:
         print("crossfam: no verdict, %s" % e, file=sys.stderr)
         sys.exit(2)
-    if violations:
+    if violations or unused:
         sys.exit(1)
     if agreed < args.min_pairs:
         print(

@@ -32,7 +32,8 @@ class CrossFamilyFrameSetTest(unittest.TestCase):
                     'segbits_monitor_bot.db': 'MONITOR_BOT.XADC.INIT_40[0] 28_1696\n'
                 },
                 'kintex7': {
-                    'segbits_monitor_bot.db': 'MONITOR_BOT.XADC.INIT_40[0] 28_1696\n'
+                    'segbits_monitor_bot_fuji2.db':
+                    'MONITOR_BOT_FUJI2.XADC.INIT_40[0] 28_1696\n'
                 },
             })
         self.assertEqual(violations, 0)
@@ -44,7 +45,8 @@ class CrossFamilyFrameSetTest(unittest.TestCase):
                     'segbits_monitor_bot.db': 'MONITOR_BOT.XADC.INIT_40[0] 20_1696\n'
                 },
                 'kintex7': {
-                    'segbits_monitor_bot.db': 'MONITOR_BOT.XADC.INIT_40[0] 28_1696\n'
+                    'segbits_monitor_bot_fuji2.db':
+                    'MONITOR_BOT_FUJI2.XADC.INIT_40[0] 28_1696\n'
                 },
             })
         self.assertEqual(violations, 1)
@@ -105,6 +107,119 @@ class CrossFamilyFrameSetTest(unittest.TestCase):
         self.assertEqual(violations, 1)
         self.assertIn('artix7/virtex7', out)
         self.assertIn('1 excused', out)
+
+
+class FamilyVariantAndDuplicateTest(unittest.TestCase):
+    def run_check(self, families, exceptions=frozenset()):
+        with tempfile.TemporaryDirectory() as root:
+            for family, files in families.items():
+                write_family(root, family, files)
+            out = io.StringIO()
+            unused = []
+            result = crossfam_check.run(
+                root, exceptions=exceptions, out=out, unused_out=unused)
+            return result, unused, out.getvalue()
+
+    def test_variant_file_and_tag_names_are_paired(self):
+        (violations, agreed), _, out = self.run_check(
+            {
+                'artix7': {
+                    'segbits_monitor_bot.db':
+                    'MONITOR_BOT.XADC.INIT_40[0] 28_1696\n'
+                },
+                'kintex7': {
+                    'segbits_monitor_bot_fuji2.db':
+                    'MONITOR_BOT_FUJI2.XADC.INIT_40[0] 28_1696\n'
+                },
+            })
+        self.assertEqual((violations, agreed), (0, 1), out)
+        self.assertIn('1 shared file(s), 1 shared tag-pair(s)', out)
+
+    def test_variant_frame_shift_is_a_violation(self):
+        (violations, _), _, out = self.run_check(
+            {
+                'artix7': {
+                    'segbits_monitor_bot.db':
+                    'MONITOR_BOT.XADC.INIT_40[0] 20_1696\n'
+                },
+                'kintex7': {
+                    'segbits_monitor_bot_fuji2.db':
+                    'MONITOR_BOT_FUJI2.XADC.INIT_40[0] 28_1696\n'
+                },
+            })
+        self.assertEqual(violations, 1, out)
+        self.assertIn('MONITOR_BOT.XADC.INIT_40[0]', out)
+
+    def test_pele1_variant_is_paired(self):
+        (violations, _), _, out = self.run_check(
+            {
+                'artix7': {
+                    'segbits_monitor_bot.db': 'MONITOR_BOT.XADC.X 20_1\n'
+                },
+                'virtex7': {
+                    'segbits_monitor_bot_pele1.db':
+                    'MONITOR_BOT_PELE1.XADC.X 28_1\n'
+                },
+            })
+        self.assertEqual(violations, 1, out)
+
+    def test_reordered_duplicate_tag_is_one_entry(self):
+        (violations, agreed), _, out = self.run_check(
+            {
+                'artix7': {
+                    'segbits_x.db': 'X.A 1_1 !1_2\n'
+                },
+                'virtex7': {
+                    'segbits_x.db': 'X.A 1_1 !1_2\nX.A !1_2 1_1\n'
+                },
+            })
+        self.assertEqual((violations, agreed), (0, 1), out)
+
+    def test_conflicting_duplicate_tag_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'X.A appears twice'):
+            self.run_check(
+                {
+                    'artix7': {
+                        'segbits_x.db': 'X.A 1_1\n'
+                    },
+                    'virtex7': {
+                        'segbits_x.db': 'X.A 2_1\nX.A 1_1\n'
+                    },
+                })
+
+    def test_two_files_for_one_canonical_tile_are_refused(self):
+        with self.assertRaisesRegex(ValueError, 'both map to'):
+            self.run_check(
+                {
+                    'artix7': {
+                        'segbits_monitor_bot.db': 'MONITOR_BOT.A 1_1\n'
+                    },
+                    'kintex7': {
+                        'segbits_monitor_bot.db': 'MONITOR_BOT.A 1_1\n',
+                        'segbits_monitor_bot_fuji2.db':
+                        'MONITOR_BOT_FUJI2.A 1_1\n',
+                    },
+                })
+
+    def test_unused_exception_is_reported(self):
+        excused = {
+            ('segbits_x.db', 'X.A', frozenset(('artix7', 'kintex7'))),
+            ('segbits_x.db', 'X.GONE', frozenset(('artix7', 'kintex7'))),
+        }
+        (violations, _), unused, out = self.run_check(
+            {
+                'artix7': {
+                    'segbits_x.db': 'X.A 1_1\n'
+                },
+                'kintex7': {
+                    'segbits_x.db': 'X.A 2_1\n'
+                },
+            },
+            exceptions=excused)
+        self.assertEqual(violations, 0, out)
+        self.assertEqual(
+            unused, [('segbits_x.db', 'X.GONE', ['artix7', 'kintex7'])])
+        self.assertIn('UNUSED EXCEPTION segbits_x.db X.GONE', out)
 
 
 class ExitStatusTest(unittest.TestCase):
@@ -219,6 +334,32 @@ class ExitStatusTest(unittest.TestCase):
             self.assertEqual(
                 self.run_main(
                     families, '--exceptions', fn, '--min-pairs', '2'), 2)
+
+    def test_unused_exception_exits_1(self):
+        families = {
+            'artix7': {
+                'segbits_x.db': 'X.A 1_1\n'
+            },
+            'kintex7': {
+                'segbits_x.db': 'X.A 1_1\n'
+            },
+        }
+        with tempfile.TemporaryDirectory() as d:
+            fn = os.path.join(d, 'exceptions')
+            with open(fn, 'w') as f:
+                f.write('segbits_x.db X.A artix7 kintex7 stale\n')
+            self.assertEqual(self.run_main(families, '--exceptions', fn), 1)
+
+    def test_conflicting_duplicate_exits_2(self):
+        families = {
+            'artix7': {
+                'segbits_x.db': 'X.A 1_1\n'
+            },
+            'kintex7': {
+                'segbits_x.db': 'X.A 1_1\nX.A 2_1\n'
+            },
+        }
+        self.assertEqual(self.run_main(families), 2)
 
     def test_missing_exceptions_file_exits_2(self):
         families = {
