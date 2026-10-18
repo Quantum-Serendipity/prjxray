@@ -634,6 +634,40 @@ class TestRoiPrecedence(unittest.TestCase):
                     assembler.parse_fasm_filename(fin.name)
 
 
+class TestAllowMissingFeaturesUnderRoi(unittest.TestCase):
+    MISSING = 'CLBLM_L_X10Y102.SLICEM_X0.NO_SUCH_FEATURE\n'
+
+    def parse(self, roi_strict):
+        db = Database(
+            os.path.join(os.path.dirname(__file__), 'test_data', 'db'),
+            'xc7a200tffg1156-1')
+        assembler = fasm_assembler.FasmAssembler(db)
+        if roi_strict is not None:
+            assembler.mark_roi_frames(
+                Roi(db=db, x1=30, x2=31, y1=26, y2=49), strict=roi_strict)
+        with tempfile.NamedTemporaryFile('w', suffix='.fasm') as fin:
+            fin.write(self.MISSING)
+            fin.flush()
+            with mock.patch.dict(os.environ,
+                                 {'XRAY_ALLOW_MISSING_FEATURES': '1'}), \
+                    contextlib.redirect_stderr(StringIO()):
+                assembler.parse_fasm_filename(fin.name)
+        return assembler
+
+    def test_strict_roi_refuses_a_missing_feature(self):
+        with self.assertRaises(fasm_assembler.FasmLookupError) as cm:
+            self.parse(True)
+        self.assertIn('not honoured under an ROI', str(cm.exception))
+        self.assertIn('NO_SUCH_FEATURE', str(cm.exception))
+
+    def test_permissive_roi_refuses_a_missing_feature(self):
+        with self.assertRaises(fasm_assembler.FasmLookupError):
+            self.parse(False)
+
+    def test_full_device_still_honours_the_hatch(self):
+        self.parse(None)
+
+
 class TestRoiStrictSharedFrames(unittest.TestCase):
     def assembler(self):
         db = Database(
