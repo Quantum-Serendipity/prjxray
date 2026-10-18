@@ -137,10 +137,14 @@ def main(argv=None):
         'only bits it sets, and that every line of every part\'s '
         'required_features.fasm resolves the same way.',
         epilog='Exit status: 0 when every check passes; 1 on any problem; 2 '
-        'when there is no verdict (no family found, or an unreadable or '
-        'malformed input).')
+        'when there is no verdict (no family found, a family set other than '
+        '--expect-families, or an unreadable or malformed input).')
     parser.add_argument('--db-root', required=True)
     parser.add_argument('--family', action='append')
+    parser.add_argument(
+        '--expect-families',
+        help='comma-separated families the db root must hold, exactly; '
+        'any other set found there is no verdict')
     parser.add_argument(
         '--require',
         action='append',
@@ -163,6 +167,23 @@ def main(argv=None):
                 args.db_root,
                 file=sys.stderr)
             return 2
+        if args.expect_families is not None:
+            want = sorted(
+                f for f in args.expect_families.split(',') if f.strip())
+            if not want:
+                print(
+                    'family-census: no verdict, --expect-families names no '
+                    'family',
+                    file=sys.stderr)
+                return 2
+            if sorted(families) != want:
+                print(
+                    'family-census: no verdict, %s holds %s where %s were '
+                    'expected' %
+                    (args.db_root, ','.join(sorted(families)) or 'nothing',
+                     ','.join(want)),
+                    file=sys.stderr)
+                return 2
         problems, checked = run(args.db_root, families, require)
     except (OSError, ValueError, AssertionError) as e:
         print('family-census: no verdict, %s' % e, file=sys.stderr)

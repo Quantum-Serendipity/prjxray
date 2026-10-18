@@ -184,8 +184,11 @@ endef
 
 $(foreach DB,$(DATABASES),$(eval $(call database,$(DB))))
 
+DB_FAMILY_CENSUS_FAMILIES ?= artix7,kintex7,spartan7,virtex7,zynq7
+
 db-family-census:
-	@$(IN_ENV) python3 utils/family_census.py --db-root $${XRAY_DATABASE_DIR:-database} --require-file utils/family_census.require
+	@if [ -z "$${XRAY_DATABASE_DIR:-}" ]; then echo "db-family-census: no verdict, XRAY_DATABASE_DIR names no prjxray-db checkout" >&2; exit 2; fi
+	@$(IN_ENV) python3 utils/family_census.py --db-root "$${XRAY_DATABASE_DIR}" --expect-families $(DB_FAMILY_CENSUS_FAMILIES) --require-file utils/family_census.require
 
 .PHONY: db-family-census
 

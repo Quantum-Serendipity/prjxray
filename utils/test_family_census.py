@@ -139,6 +139,37 @@ class TestFamilyCensus(unittest.TestCase):
             }}, '--require-file', f.name)
         self.assertEqual(rc, 2)
 
+    def test_expect_families_refuses_a_smaller_population(self):
+        rc, out = self.census(
+            {
+                'artix7': {
+                    'segbits_cfg_center_mid.db': WIDTH + X0 + X1
+                },
+            }, '--expect-families', 'artix7,kintex7', *REQUIRE)
+        self.assertEqual(rc, 2, out)
+
+    def test_expect_families_matching_the_population_grades(self):
+        rc, out = self.census(
+            {
+                'artix7': {
+                    'segbits_cfg_center_mid.db': WIDTH + X0 + X1
+                },
+                'kintex7': {
+                    'segbits_cfg_center_mid.db': WIDTH + X0 + X1
+                },
+            }, '--expect-families', 'kintex7,artix7', *REQUIRE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('2 family(ies), 4 check(s), 0 problem(s)', out)
+
+    def test_expect_families_naming_nothing_is_no_verdict(self):
+        rc, out = self.census(
+            {
+                'artix7': {
+                    'segbits_cfg_center_mid.db': WIDTH + X0 + X1
+                },
+            }, '--expect-families', ',', *REQUIRE)
+        self.assertEqual(rc, 2, out)
+
 
 COMMITTED_REQUIRE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'family_census.require')
