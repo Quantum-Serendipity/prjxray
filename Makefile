@@ -184,6 +184,11 @@ endef
 
 $(foreach DB,$(DATABASES),$(eval $(call database,$(DB))))
 
+db-family-census:
+	@$(IN_ENV) python3 utils/family_census.py --db-root $${XRAY_DATABASE_DIR:-database} --require-file utils/family_census.require
+
+.PHONY: db-family-census
+
 # Targets related to Project X-Ray parts
 # --------------------------------------
 

@@ -178,7 +178,7 @@ def read_tag_bits(fn, require_origin):
     return entries
 
 
-def check_origin_info(db_root, verbose=False, aliases=None, drift_fatal=False):
+def check_origin_info(db_root, verbose=False, aliases=None, drift_fatal=True):
     '''Verify each segbits_*.origin_info.db, and compare it to its segbits file'''
 
     files = 0
@@ -209,13 +209,27 @@ def check_origin_info(db_root, verbose=False, aliases=None, drift_fatal=False):
                     os.path.basename(origin_fn), len(only_origin),
                     len(only_segbits), len(differ)))
         files += 1
+    uncovered = [
+        os.path.basename(fn)
+        for fn in sorted(glob.glob('%s/segbits_*.db' % db_root))
+        if not fn.endswith('.origin_info.db')
+        and not os.path.exists(fn[:-len('.db')] + '.origin_info.db')
+    ]
     for message in drifted:
         print("WARNING: origin_info drift: %s" % message)
+    for fn in uncovered:
+        print("WARNING: %s has no origin_info companion" % fn)
     print(
-        "segbits_*.origin_info.db: %d okay, %d drifted from segbits" %
-        (files, len(drifted)))
-    assert not (drift_fatal and drifted), \
-        "%d origin_info file(s) disagree with their segbits file" % len(drifted)
+        "segbits_*.origin_info.db: %d okay, %d drifted from segbits%s; "
+        "%d segbits file(s) without origin_info" % (
+            files - len(drifted), len(drifted),
+            " (non-fatal under --origin-drift-warn)"
+            if (drifted or uncovered) and not drift_fatal else "",
+            len(uncovered)))
+    assert not (drift_fatal and (drifted or uncovered)), (
+        "%d origin_info file(s) disagree with their segbits file, "
+        "%d segbits file(s) have no origin_info; pass --origin-drift-warn "
+        "to report without failing" % (len(drifted), len(uncovered)))
 
 
 def check_tile_overlap(db, verbose=False):
@@ -300,7 +314,7 @@ def check_tile_overlap(db, verbose=False):
     print("Checked %s tiles, %s bits" % (tiles_checked, bits_used))
 
 
-def run(db_root, part, verbose=False, aliases=None, origin_drift_fatal=False):
+def run(db_root, part, verbose=False, aliases=None, origin_drift_fatal=True):
     # Start by running a basic check on db files
     print("Checking individual .db...")
     parsedb_all(db_root, verbose=verbose, aliases=aliases)
@@ -340,10 +354,11 @@ def main():
         help='file of alias groups (see read_alias_file): features in one '
         'group may share a bit set')
     parser.add_argument(
-        '--origin-drift-fatal',
+        '--origin-drift-warn',
         action='store_true',
-        help='fail when a segbits_*.origin_info.db and its segbits_*.db do '
-        'not carry the same tags and bits')
+        help='report, without failing, a segbits_*.origin_info.db whose tags '
+        'and bits differ from its segbits_*.db, or a segbits_*.db with no '
+        'origin_info companion')
     args = parser.parse_args()
 
     aliases = read_alias_file(args.alias_file) if args.alias_file else None
@@ -352,7 +367,7 @@ def main():
         args.part,
         verbose=args.verbose,
         aliases=aliases,
-        origin_drift_fatal=args.origin_drift_fatal)
+        origin_drift_fatal=not args.origin_drift_warn)
 
 
 if __name__ == '__main__':

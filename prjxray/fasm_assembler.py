@@ -158,6 +158,7 @@ class FasmAssembler(object):
         # default permissive mode.
         self.roi = None
         self.roi_frames = None
+        self.roi_marked = False
         # (tile, feature) -> the FASM line that named it.  A dict, not a list,
         # because a single out-of-ROI tile typically contributes dozens of
         # features and repeating the same tile dozens of times buries the
@@ -495,7 +496,12 @@ class FasmAssembler(object):
             # them — and the user gets a console warning per missing line.
             # Set XRAY_ALLOW_MISSING_FEATURES=1 to opt in.
             import os
-            if os.environ.get("XRAY_ALLOW_MISSING_FEATURES") == "1":
+            hatch = os.environ.get("XRAY_ALLOW_MISSING_FEATURES") == "1"
+            if hatch and self.roi_marked:
+                missing_features.insert(
+                    0, "XRAY_ALLOW_MISSING_FEATURES=1 is not honoured "
+                    "under an ROI; every feature of a partial must resolve.")
+            elif hatch:
                 import sys
                 print("WARNING: " + str(len(missing_features))
                         + " missing-feature lines suppressed by "
@@ -557,6 +563,7 @@ class FasmAssembler(object):
                         len(sharing) > _ROI_VIOLATION_REPORT_LIMIT else ''))
 
         self.frames_in_use |= roi_frames
+        self.roi_marked = True
         if strict:
             self.roi = roi
             self.roi_frames = frozenset(roi_frames)

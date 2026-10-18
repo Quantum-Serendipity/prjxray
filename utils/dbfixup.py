@@ -241,7 +241,7 @@ def mode_reason(mode):
     presence-bit case), `<N candidates>` when the solution did not narrow to
     within -c, and `<m1 N>`/`<m0 N>`/`<M a b>` when it fell under -m/-M.
     """
-    m = re.match(r'<(const[01]|always)>', mode)
+    m = re.match(r'<?(const[01]|always)>?$', mode)
     if m:
         return m.group(1)
     if re.match(r'<\d+ candidates>', mode):
@@ -304,47 +304,44 @@ def add_zero_bits(
             continue
 
         assert mode not in (
-            "<const0>",
-            "<const1>"), "Entries must be resolved. line: %s" % (line, )
+            "<const0>", "<const1>",
+            "always"), "Entries must be resolved. line: %s" % (line, )
 
-        if mode == "always":
-            new_line = line
+        if mode:
+            assert mode == "<0 candidates>", line
+            bits = set()
         else:
-            if mode:
-                assert mode == "<0 candidates>", line
-                bits = set()
-            else:
-                bits = set(bits)
-            """
-            This appears to be a large range of one hot interconnect bits
-            They are immediately before the first CLB real bits
-            """
-            if clb_int:
-                zero_range(tag, bits, 22, 25)
+            bits = set(bits)
+        """
+        This appears to be a large range of one hot interconnect bits
+        They are immediately before the first CLB real bits
+        """
+        if clb_int:
+            zero_range(tag, bits, 22, 25)
 
-                set_bits = [bit for bit in bits if bit[0] != '!']
-                if len(set_bits) not in [2, 4]:
-                    # All INT bits appear to be only have 2 or 4 bits.
-                    verbose and print(
-                        "WARNING: dropping line with %d bits, not [2, 4]: %s, %s"
-                        % (len(set_bits), bits, line))
-                    dropped("clb-int-bitcount", line)
-                    drops += 1
-                    continue
-
-            zero_groups.add_bits_from_zero_groups(
-                tag, bits, strict=strict, verbose=verbose)
-
-            if strict:
-                assert len(bits) > 0, 'Line {} found no bits.'.format(line)
-            elif len(bits) == 0:
+            set_bits = [bit for bit in bits if bit[0] != '!']
+            if len(set_bits) not in [2, 4]:
+                # All INT bits appear to be only have 2 or 4 bits.
                 verbose and print(
-                    "WARNING: dropping unresolved line: %s" % line)
-                dropped("no-bits", line)
+                    "WARNING: dropping line with %d bits, not [2, 4]: %s, %s"
+                    % (len(set_bits), bits, line))
+                dropped("clb-int-bitcount", line)
                 drops += 1
                 continue
 
-            new_line = " ".join([tag] + sorted(bits))
+        zero_groups.add_bits_from_zero_groups(
+            tag, bits, strict=strict, verbose=verbose)
+
+        if strict:
+            assert len(bits) > 0, 'Line {} found no bits.'.format(line)
+        elif len(bits) == 0:
+            verbose and print(
+                "WARNING: dropping unresolved line: %s" % line)
+            dropped("no-bits", line)
+            drops += 1
+            continue
+
+        new_line = " ".join([tag] + sorted(bits))
 
         if re.match(r'.*<.*>.*', new_line):
             print("Original line: %s" % line)
@@ -449,8 +446,8 @@ def remove_ambiguous_solutions(
 
         if bits not in dropped_solutions:
             output_lines.add(l)
-            drops += 1
         else:
+            drops += 1
             if unresolved is not None:
                 unresolved.append((fn_in, "duplicate-solution", l))
             if verbose:
