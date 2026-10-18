@@ -16,97 +16,39 @@ test -e "$2"
 
 tmp1=`mktemp -p .`
 tmp2=`mktemp -p .`
+tmp3=`mktemp -p .`
+tmp4=`mktemp -p .`
 
-# The lock must live on the SAME FILESYSTEM as the database it guards.
-#
-# The previous default was a hard-coded node-local "/tmp/segbits_$1.db.lock"
-# while the database it protects lives under $XRAY_DATABASE_DIR, which on a
-# distributed run is SHARED storage. Two workers on two nodes then take two
-# different locks, both believe they hold it, and perform an unguarded
-# read-modify-write of the same segbits file -- so merges are SILENTLY LOST.
-# Nothing reports it: each worker's mergedb.sh exits 0.
-#
-# Note this was not a missing variable -- LOCKFILE and LOCKTIMEOUT already
-# existed here. They were simply hard-coded, and a plain assignment also means
-# an exported LOCKFILE from the environment was overwritten rather than
-# honoured. Both are now overridable, with a default that sits beside the
-# database rather than beside the process.
 LOCKDIR="$XRAY_DATABASE_DIR/$XRAY_DATABASE"
-LOCKFILE="${LOCKFILE:-$LOCKDIR/.segbits_$1.db.lock}"
-LOCKTIMEOUT="${LOCKTIMEOUT:-30}" # seconds
-LOCKID=222
 mkdir -p "$LOCKDIR"
 
+db=$LOCKDIR/segbits_$1.db
+db_origin=$LOCKDIR/segbits_$1.origin_info.db
+ismask=false
+if [[ "$1" == mask_* ]]; then
+	db=$LOCKDIR/$1.db
+	ismask=true
+fi
+
+LOCKFILE="${LOCKFILE:-$LOCKDIR/.$(basename "$db").lock}"
+LOCKTIMEOUT="${LOCKTIMEOUT:-30}"
+LOCKID=222
+
+created=()
+landed=false
 function finish {
     echo "Cleaning up temp files"
-    rm -f "$tmp1"
-    rm -f "$tmp2"
+    rm -f "$tmp1" "$tmp2" "$tmp3" "$tmp4"
+    if ! $landed ; then
+        for f in "${created[@]}"; do
+            rm -f "$f"
+        done
+    fi
 }
 trap finish EXIT
 
-db=$XRAY_DATABASE_DIR/$XRAY_DATABASE/segbits_$1.db
-
-# --- Vivado version provenance stamp -----------------------------------------
-#
-# This is the ONLY layer that catches a PARTIALLY REBUILT database -- the case
-# where some segbits came from one Vivado version and some from another,
-# because three fuzzers were re-run last month under a different install.
-#
-# Environment gates cannot see that: they check the version of the process that
-# is running now, not the version that produced the bytes already on disk. Only
-# the artefacts can carry that, and upstream's do not -- segdata_*.txt,
-# segbits_*.db and mask_*.db have no provenance field at all.
-#
-# Adopting an existing database that predates this patch: write the stamp by
-# hand from that tree's known provenance, e.g.
-#   echo v2017.2 > "$XRAY_FAMILY_DIR/.vivado-version"
-# An absent stamp is treated as "unknown, adopt it", NOT as a mismatch --
-# otherwise this patch would refuse to merge into every existing checkout.
-#
-# --- WHERE THE VERSION COMES FROM, and why it is derived HERE ---------------
-#
-# The first version of this patch read XRAY_VIVADO_VERSION_VERIFIED and did
-# nothing at all when it was empty. It was ALWAYS empty. utils/genheader.sh
-# exports it, but genheader.sh is sourced by generate.sh, and `pushdb` is a
-# different make recipe in a different process; the variable does not cross
-# that boundary. Measured in Unit 3.1: four merges, four `[ -n '' ]`, zero
-# stamps written. The layer described two paragraphs up as "the ONLY layer that
-# catches a PARTIALLY REBUILT database" had never once fired.
-#
-# The alternative fix was to export the variable from settings/<family>.sh,
-# which is sourced once per campaign and would reach pushdb for free. It is
-# rejected for two reasons, the second decisive:
-#
-#   1. Coverage. A settings export reaches only processes descended from a
-#      shell that sourced settings. It does not reach a hand-run mergedb.sh --
-#      which is how a database gets adopted or repaired -- and it does not
-#      reach a distributed worker that assembled its own environment, which is
-#      exactly the case the LOCKFILE fix above exists for. The stamp needs to
-#      cover every path that can WRITE the database, and that set is defined by
-#      this script, not by who sourced what.
-#   2. It would silently disable the layer above it. genheader.sh's gate is
-#      `if [ -z "${XRAY_VIVADO_VERSION_VERIFIED:-}" ]` -- it SKIPS its own
-#      version check when the variable is already populated. Exporting it at
-#      settings time turns a per-fuzzer re-check into a once-per-campaign
-#      check, which is criticism 3 of the four that the genheader patch was
-#      written to fix. Buying the stamp by breaking the gate above it is a bad
-#      trade.
-#
-# So: honour an inherited value if there is one (free, and it is what
-# genheader.sh exports on the paths that do reach here), otherwise derive it.
-#
-# Cost: `vivado.sh -version` measured at 0.24 s warm on this host, once per
-# mergedb.sh process, against ~229 ${XRAY_MERGEDB} sites across the 42 fuzzers
-# -- ~55 s over a five-family campaign that runs for tens of hours.
-#
-# If no version can be derived at all, say so on stderr rather than silently
-# skipping the stamp: an unwritten stamp is how this guard spent its entire
-# life inert. XRAY_VIVADO_STAMP_REQUIRED=1 turns that into a hard failure, for
-# a CI that wants "the database is always attributed" to be an invariant.
 _stamp="$XRAY_DATABASE_DIR/$XRAY_DATABASE/.vivado-version"
 if [ -z "${XRAY_VIVADO_VERSION_VERIFIED:-}" ] && [ -n "${XRAY_VIVADO:-}" ]; then
-	# `set -e` is on: a failing command substitution in an assignment would
-	# abort the merge, so the failure is absorbed and reported below.
 	XRAY_VIVADO_VERSION_VERIFIED="$(${XRAY_VIVADO} -version 2>/dev/null \
 		| head -1 | cut -d' ' -f2)" || XRAY_VIVADO_VERSION_VERIFIED=""
 fi
@@ -120,23 +62,12 @@ if [ -z "${XRAY_VIVADO_VERSION_VERIFIED:-}" ]; then
 	fi
 fi
 
-# if the DB exists acquire a lock
-if [ -f $db ]; then
-	eval "exec $LOCKID>$LOCKFILE"
-	# the lock is automatically released on script exit
-	flock --timeout $LOCKTIMEOUT $LOCKID
-	if [ ! $? -eq 0 ]; then
-		echo "Timeout while waiting for lock"
-		finish
-		exit 1
-	fi
+eval "exec $LOCKID>\"\$LOCKFILE\""
+if ! flock --timeout "$LOCKTIMEOUT" $LOCKID; then
+	echo "Timeout while waiting for lock on $LOCKFILE" >&2
+	exit 1
 fi
 
-# The mismatch check sits AFTER the lock, not before it. In the first version
-# of this patch it was before, so between reading the stamp and taking the lock
-# another worker could land a merge under a different version and this one
-# would never see it -- a race in the check whose entire job is to stop two
-# versions sharing a database.
 if [ -n "${XRAY_VIVADO_VERSION_VERIFIED:-}" ] && [ -e "$_stamp" ] \
    && [ "$(cat "$_stamp")" != "$XRAY_VIVADO_VERSION_VERIFIED" ]; then
 	echo "FATAL: database at $XRAY_DATABASE_DIR/$XRAY_DATABASE was built with" \
@@ -157,7 +88,6 @@ ${XRAY_PARSEDB} --strict "$2"
 # However, expand back to L/R to make downstream tools not depend on this
 # in case we later find exceptions
 
-ismask=false
 case "$1" in
 	clbll_l)
 		sed < "$2" > "$tmp1" \
@@ -424,8 +354,6 @@ case "$1" in
 		cp "$2" "$tmp1" ;;
 
 	mask_*)
-		db=$XRAY_DATABASE_DIR/$XRAY_DATABASE/$1.db
-		ismask=true
 		cp "$2" "$tmp1" ;;
 
 	*)
@@ -434,108 +362,34 @@ case "$1" in
 		exit 1
 esac
 
-# --- prjcombine cross-validation merge gate ----------------------------------
-#
-# An INDEPENDENT oracle, in the merge path. prjcombine's 7-series bit database
-# was reverse-engineered with ISE 14.7 + xdl/bitgen, not Vivado, so a solver
-# that invents a coordinate is caught here by something that never saw the tool
-# that produced it. Three checks:
-#
-#   [C] every bit coordinate in the incoming file is one prjcombine documents
-#       for that tile class -- needs no feature-name table, so it covers every
-#       mapped tile type immediately, and it is the one with teeth;
-#   [R] every coordinate is inside the tile's own frames x words*32 box;
-#   [F] for features with a hand-written prjcombine counterpart, the bit sets
-#       are set-identical.
-#
-# A tile type outside prjcombine's coverage table prints `gate: SKIP` and exits
-# 0 -- a NAMED, enumerable gap, not a silent pass. Anything the parser cannot
-# account for is exit 2, never a warning. mask_* types fall into SKIP, so mask
-# merges are unaffected.
-#
-# Position matters twice. It is after the tile-type-normalising `case`, so
-# "$tmp1" already carries the final TILE_TYPE prefix that prjcombine is indexed
-# by; and it is before `touch "$db"`, so under the `set -e` at the top of this
-# script a rejection aborts BEFORE the database is touched at all. It also runs
-# inside the flock taken above, which is released only on script exit, so no
-# other worker can land a merge past it while it is thinking.
-#
-# --db-root is where the [R] check reads tilegrid.json from. It prefers the
-# pinned full database and falls back to the workspace's own, which several
-# fuzzers redirect to $FUZDIR/build/database for a staging merge; if neither
-# carries a tilegrid the range check reports itself as NOT RUN rather than
-# passing silently.
-#
-# Two ways off: XRAY_CROSSVALIDATE=0, and XC7DPR_ROOT unset. The second is what
-# makes this safe to carry -- an ordinary prjxray checkout without this repo
-# beside it behaves exactly as before.
-#
-# Measured cost: 0.55 s per merge (artix7 segbits_int_l.db, 1,598 coordinates,
-# warm), against ~229 merge sites in a full five-family campaign.
 if [ "${XRAY_CROSSVALIDATE:-1}" = 1 ] && [ -n "${XC7DPR_ROOT:-}" ] ; then
 	python3 "$XC7DPR_ROOT/scripts/prjcombine-crossvalidate.py" \
 		--gate "$1" "$tmp1" \
 		--db-root "${PRJXRAY_DB_DIR:-$XRAY_DATABASE_DIR}" \
 		--family "$XRAY_DATABASE"
 fi
-# --- end prjcombine cross-validation merge gate -------------------------------
 
+[ -e "$db" ] || created+=("$db")
 touch "$db"
 if $ismask ; then
     sort -u "$tmp1" "$db" | grep -v '<.*>' > "$tmp2" || true
 else
-    # tmp1 must be placed second to take precedence over old bad entries
-    if ! $ismask ; then
-	db_origin=$XRAY_DATABASE_DIR/$XRAY_DATABASE/segbits_$1.origin_info.db
-        if [ ! -f $db_origin ] ; then
-            touch "$db_origin"
-        fi
-        python3 ${XRAY_DIR}/utils/mergedb.py --out "$db_origin" "$db_origin" "$tmp1" --track_origin
+    if [ ! -f "$db_origin" ] ; then
+        created+=("$db_origin")
+        touch "$db_origin"
     fi
+    # tmp1 must be placed second to take precedence over old bad entries
+    python3 ${XRAY_DIR}/utils/mergedb.py --out "$tmp3" "$db_origin" "$tmp1" --track_origin
     python3 ${XRAY_DIR}/utils/mergedb.py --out "$tmp2" "$db" "$tmp1"
 fi
 # Check aggregate db for consistency and make canonical
-${XRAY_PARSEDB} --strict "$tmp2" "$db"
+${XRAY_PARSEDB} --strict "$tmp2" "$tmp4"
+cat "$tmp4" > "$db"
+if ! $ismask ; then
+    cat "$tmp3" > "$db_origin"
+fi
+landed=true
 
-# --- canonical serialisation order -------------------------------------------
-#
-# parsedb.py's "canonical" is `sorted(lines)` -- plain ASCII order on the whole
-# line. utils/sort_db.py's is different and it is the one the SHIPPED database
-# is in: numeric-aware tag components, and bits sorted ignoring the leading
-# `!`. Nothing in the fuzzer path applied it. `make db-format-<family>` did,
-# and that is a separate target from the fuzzer's own `run`.
-#
-# The cost of leaving it out is not cosmetic. Straight after
-# `make -C fuzzers/010-clb-lutinit run`, `git diff` against the reference
-# database was 2,170 lines -- 454 insertions, 454 deletions across 8 files --
-# with ZERO set differences: same tags, same bits, same origins, and not one
-# LUT-INIT line among the 908 changed. Every changed line was a multi-bit tag
-# belonging to some OTHER fuzzer, re-serialised on its way past. Anyone wiring
-# CI that diffs fuzzer output against the reference gets a loud red failure and
-# goes hunting a determinism bug that does not exist. See
-# docs/fidelity-ab-result.md section 5.4.
-#
-# So canonicalisation happens HERE, not in a stage a caller has to remember.
-# mergedb.sh is the choke point: every path that writes a segbits or mask file
-# goes through it, including `make -C fuzzers/<one> run`, which reaches no
-# top-level Makefile target at all. Putting it in `db-<family>` instead would
-# be one line and would leave the single-fuzzer path -- the one Unit 3.1
-# actually ran -- still producing raw order.
-#
-# It runs under the same lock and AFTER parsedb has accepted the result, so a
-# rejected merge is never reordered, and it is the last thing to touch the
-# files before the stamp is written.
-#
-# PYTHONPATH is set explicitly because sort_db.py imports `utils.xjson` and
-# `utils.cmp`, which need $XRAY_DIR on sys.path -- running it as
-# `python3 $XRAY_DIR/utils/sort_db.py` puts $XRAY_DIR/utils there instead.
-#
-# Cost: 0.06 s on a 9-line file, 0.13 s on 3,636-line segbits_int_l.db, 0.63 s
-# on the 36,864-line segbits_bram_l.block_ram.db.
-#
-# XRAY_SORTDB=0 turns it off. A failure is NOT swallowed: `set -e` aborts,
-# because a database silently left in the wrong order is the defect this exists
-# to remove.
 if [ "${XRAY_SORTDB:-1}" = 1 ]; then
 	if $ismask ; then
 		PYTHONPATH="${XRAY_DIR}${PYTHONPATH:+:$PYTHONPATH}" \
@@ -546,9 +400,6 @@ if [ "${XRAY_SORTDB:-1}" = 1 ]; then
 	fi
 fi
 
-# Record the version that produced this merge. Written AFTER parsedb has
-# accepted the result, and still under the lock taken above (flock is released
-# on script exit), so the stamp never claims a merge that did not land.
 if [ -n "${XRAY_VIVADO_VERSION_VERIFIED:-}" ]; then
 	echo "$XRAY_VIVADO_VERSION_VERIFIED" > "$_stamp"
 fi
