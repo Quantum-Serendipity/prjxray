@@ -540,9 +540,7 @@ void Configuration<Series7>::createPartialConfigurationPackage(
 	nop();
 	nop();
 
-	// A .bit loaded over JTAG carries IDCODE; a raw ICAP stream does not.
-	if (options.emit_idcode)
-		write1(ConfigurationRegister::IDCODE, part->idcode());
+	write1(ConfigurationRegister::IDCODE, part->idcode());
 
 	write1(ConfigurationRegister::CMD,
 	       static_cast<uint32_t>(xc7series::Command::NOP));

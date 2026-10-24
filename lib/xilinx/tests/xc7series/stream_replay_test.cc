@@ -25,6 +25,8 @@ using namespace prjxray::xilinx;
 
 namespace {
 
+constexpr uint32_t kReplayTestIdcode = 0x1234;
+
 xc7series::Part ReplayTestPart() {
 	std::vector<xc7series::FrameAddress> addresses;
 	auto add = [&addresses](xc7series::BlockType blk, int row, int col,
@@ -38,7 +40,7 @@ xc7series::Part ReplayTestPart() {
 	add(xc7series::BlockType::CLB_IO_CLK, 1, 0, 4);
 	add(xc7series::BlockType::BLOCK_RAM, 0, 0, 4);
 	add(xc7series::BlockType::BLOCK_RAM, 0, 1, 4);
-	return xc7series::Part(0x1234, addresses);
+	return xc7series::Part(kReplayTestIdcode, addresses);
 }
 
 uint32_t Far(xc7series::BlockType blk, int row, int col, int minor) {
@@ -73,6 +75,10 @@ std::vector<uint8_t> Serialize(const Series7::ConfigurationPackage& packets) {
 
 class Stream {
        public:
+	explicit Stream(bool idcode = true) {
+		if (idcode)
+			Write(12, {kReplayTestIdcode});
+	}
 	Stream& Write(uint32_t reg, std::vector<uint32_t> payload) {
 		words_.push_back((1u << 29) | (2u << 27) | (reg << 13) |
 		                 static_cast<uint32_t>(payload.size()));
@@ -342,10 +348,39 @@ TEST(StreamReplayTest, ForeignIdcodeIsRefused) {
 	xc7series::StreamReplay replay;
 	std::string error;
 	EXPECT_TRUE(xc7series::ReplayConfigurationStream(
-	    Stream().Write(12, {0x1234}).Bytes(), part, &replay, &error))
+	    Stream(false).Write(12, {0x1234}).Bytes(), part, &replay, &error))
 	    << error;
 	EXPECT_FALSE(xc7series::ReplayConfigurationStream(
-	    Stream().Write(12, {0x4321}).Bytes(), part, &replay, &error));
+	    Stream(false).Write(12, {0x4321}).Bytes(), part, &replay, &error));
+}
+
+TEST(StreamReplayTest, FdriBeforeAnyIdcodeWriteIsRefused) {
+	auto part = ReplayTestPart();
+	const uint32_t a0 = Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0);
+	auto build = [a0](bool idcode, bool idcode_after) {
+		Stream s(idcode);
+		s.Cmd(xc7series::Command::WCFG)
+		    .FarWrite(a0)
+		    .Fdri(Concat({Frame(1), Frame(2)}));
+		if (idcode_after)
+			s.Write(12, {kReplayTestIdcode});
+		s.Cmd(xc7series::Command::DESYNC);
+		return s.Bytes();
+	};
+	xc7series::StreamReplay replay;
+	std::string error;
+	EXPECT_TRUE(xc7series::ReplayConfigurationStream(build(true, false),
+	                                                 part, &replay, &error))
+	    << error;
+	for (bool after : {false, true}) {
+		error.clear();
+		EXPECT_FALSE(xc7series::ReplayConfigurationStream(
+		    build(false, after), part, &replay, &error))
+		    << after;
+		EXPECT_NE(error.find("before any IDCODE write"),
+		          std::string::npos)
+		    << error;
+	}
 }
 
 TEST(StreamReplayTest, TruncatedPacketIsRefused) {

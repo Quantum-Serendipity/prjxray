@@ -68,10 +68,6 @@ struct PrePassReport {
 // (gateware/vivado-dfx-golden/golden/packets/rm_*_partial.packets.txt); see
 // docs/partial-bitstream.md for the word-level map they were read from.
 struct PartialStreamOptions {
-	// A .bit loaded over JTAG carries an IDCODE write; a raw stream fed to
-	// the ICAP does not. False is --raw.
-	bool emit_idcode = true;
-
 	// True: compute the stream CRC and write it to the CRC register.
 	// False: substitute a CMD:RCRC write in its place, which is exactly
 	// what Vivado's BITSTREAM.GENERAL.CRC=DISABLE does -- measured against

@@ -70,6 +70,32 @@ for p in 2 7; do
 	fi
 done
 
+midrow_bit=(--partial_bitstream --prepass off --frm_file "$tmp/midrow.frm"
+	--static_frames "$tmp/midrow-static.frm" --pad_frames 0)
+run midrow-bit accept "${midrow_bit[@]}"
+cp "$tmp/out.bit" "$tmp/midrow.bit" 2>/dev/null
+run midrow-raw accept "${midrow_bit[@]}" --raw
+cp "$tmp/out.bit" "$tmp/midrow.raw" 2>/dev/null
+idcode=$(sed -n 's/^idcode: *0x\([0-9a-fA-F]*\)$/\1/p' "$PART")
+idcode_hex=$(printf '30018001%08x' "0x$idcode")
+if [[ -s $tmp/midrow.raw && -s $tmp/midrow.bit ]] &&
+   tail -c "$(stat -c %s "$tmp/midrow.raw")" "$tmp/midrow.bit" |
+	cmp -s - "$tmp/midrow.raw"; then
+	echo "ok   midrow-raw: a byte-exact suffix of the .bit"
+else
+	echo "FAIL midrow-raw: not a byte-exact suffix of the .bit"
+	failures=$((failures + 1))
+fi
+for f in midrow.bit midrow.raw; do
+	if od -An -tx1 -v "$tmp/$f" 2>/dev/null | tr -d ' \n' |
+		grep -qF "$idcode_hex"; then
+		echo "ok   $f: writes IDCODE 0x$idcode"
+	else
+		echo "FAIL $f: no IDCODE write of 0x$idcode"
+		failures=$((failures + 1))
+	fi
+done
+
 full=(--frm_file "$tmp/rowend.frm")
 run full accept "${full[@]}"
 run full-verify accept "${full[@]}" --verify
