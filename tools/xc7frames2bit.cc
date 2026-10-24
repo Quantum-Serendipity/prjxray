@@ -105,8 +105,9 @@ DEFINE_string(
 DEFINE_bool(raw,
             false,
             "Write a raw configuration word stream for the ICAP instead of a "
-            ".bit: no .bit TLV header, and no IDCODE register write. A .bit "
-            "loaded over JTAG carries IDCODE; a raw ICAP stream does not.");
+            ".bit: the .bit with its TLV header removed, byte for byte. The "
+            "IDCODE register write stays: the configuration engine refuses "
+            "FDRI before it, through the ICAP as over JTAG.");
 DEFINE_string(crc,
               "compute",
               "PARTIAL BITSTREAMS ONLY (--partial_bitstream). compute: "
@@ -673,7 +674,6 @@ struct Frames2BitWriter {
 			typename ArchType::ConfigurationPackage
 			    configuration_package;
 			xilinx::PartialStreamOptions options;
-			options.emit_idcode = !FLAGS_raw;
 			options.trailing_nops = FLAGS_trailing_nops;
 			try {
 				if (FLAGS_crc == "compute")

@@ -91,6 +91,7 @@ class Replayer {
 					    Hex(payload[0]) +
 					    " and the part's is " +
 					    Hex(part_.idcode()));
+				idcode_seen_ = true;
 				return true;
 			default:
 				return true;
@@ -187,6 +188,10 @@ class Replayer {
 	bool WriteFdri(const std::vector<uint32_t>& payload) {
 		if (payload.empty())
 			return true;
+		if (!idcode_seen_)
+			return Fail(
+			    "an FDRI write before any IDCODE write after the sync "
+			    "word; the device sets ID_ERROR and commits no frame");
 		if (cmd_ != kCmdWcfg)
 			return Fail("an FDRI write while CMD holds " +
 			            std::to_string(cmd_) + ", not WCFG");
@@ -279,6 +284,7 @@ class Replayer {
 	std::vector<uint32_t> frame_buffer_;
 	bool expect_mfwr_ = false;
 	bool desynced_ = false;
+	bool idcode_seen_ = false;
 };
 
 }  // namespace

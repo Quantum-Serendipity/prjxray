@@ -1300,8 +1300,7 @@ TEST(ConfigurationTest, PartialPackageInterleavesTheTwoPasses) {
 	EXPECT_NE(type2[0][0], type2[2][0]);
 }
 
-// Unit 6.2 step 4. A .bit over JTAG carries IDCODE; a raw ICAP stream does not.
-TEST(ConfigurationTest, PartialPackageOmitsIdcodeInRawMode) {
+TEST(ConfigurationTest, PartialPackageWritesIdcodeBeforeTheFirstFdri) {
 	auto part = absl::optional<xc7series::Part>(MakeTestPart());
 	auto statics = StaticOverTestPart();
 	Frames<Series7>::Frames2Data frames;
@@ -1310,32 +1309,32 @@ TEST(ConfigurationTest, PartialPackageOmitsIdcodeInRawMode) {
 		         Addr(xc7series::BlockType::CLB_IO_CLK, 0, 0, m), 0xAB);
 	auto blocks = Configuration<Series7>::createPartialPacketData(frames, statics,
 	                                                              part, 0);
-	auto count_idcode = [](const Series7::ConfigurationPackage& pkg) {
-		size_t n = 0;
-		for (auto& p : pkg)
-			if (p->address() == Series7::ConfRegType::IDCODE &&
-			    p->opcode() ==
-			        ConfigurationPacket<
-			            Series7::ConfRegType>::Opcode::Write)
-				++n;
-		return n;
-	};
-
-	PartialStreamOptions jtag;
-	Series7::ConfigurationPackage bit_pkg;
-	Configuration<Series7>::createPartialConfigurationPackage(
-	    bit_pkg, blocks, part, jtag);
-	EXPECT_EQ(count_idcode(bit_pkg), 1u);
-
-	PartialStreamOptions icap;
-	icap.emit_idcode = false;
-	Series7::ConfigurationPackage raw_pkg;
-	Configuration<Series7>::createPartialConfigurationPackage(
-	    raw_pkg, blocks, part, icap);
-	EXPECT_EQ(count_idcode(raw_pkg), 0u);
-	// Exactly one packet fewer, and the CRC differs because the IDCODE
-	// write is accumulated.
-	EXPECT_EQ(raw_pkg.size() + 1, bit_pkg.size());
+	for (bool crc : {true, false}) {
+		PartialStreamOptions options;
+		options.compute_crc = crc;
+		Series7::ConfigurationPackage pkg;
+		Configuration<Series7>::createPartialConfigurationPackage(
+		    pkg, blocks, part, options);
+		size_t idcodes = 0, idcode_at = pkg.size(), fdri_at = pkg.size();
+		for (size_t i = 0; i < pkg.size(); ++i) {
+			const auto& p = *pkg[i];
+			if (p.opcode() !=
+			    ConfigurationPacket<Series7::ConfRegType>::Opcode::Write)
+				continue;
+			if (p.address() == Series7::ConfRegType::IDCODE) {
+				++idcodes;
+				idcode_at = std::min(idcode_at, i);
+				ASSERT_EQ(p.data().size(), 1u);
+				EXPECT_EQ(p.data()[0], part->idcode());
+			}
+			if (p.address() == Series7::ConfRegType::FDRI &&
+			    fdri_at == pkg.size())
+				fdri_at = i;
+		}
+		EXPECT_EQ(idcodes, 1u) << crc;
+		ASSERT_LT(fdri_at, pkg.size());
+		EXPECT_LT(idcode_at, fdri_at) << crc;
+	}
 }
 
 // Unit 6.2 step 5. Vivado's BITSTREAM.GENERAL.CRC=DISABLE substitutes exactly
