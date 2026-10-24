@@ -1379,6 +1379,103 @@ TEST(ConfigurationTest, PartialPackageCrcDisableIsATwoWordSubstitution) {
 	EXPECT_NE(a[at].second, 0u);
 }
 
+namespace {
+
+struct VendorCrcWrites {
+	size_t writes = 0;
+	size_t matched = 0;
+	std::vector<std::pair<uint32_t, uint32_t>> mismatches;
+	uint32_t last_from_prefix = 0;
+	uint32_t last_vendor = 0;
+};
+
+VendorCrcWrites GradeVendorCrcWrites(const char* path, bool whole_prefix) {
+	using Reg = Series7::ConfRegType;
+	VendorCrcWrites out;
+	auto file = prjxray::MemoryMappedFile::InitWithFile(path);
+	EXPECT_TRUE(file) << path;
+	if (!file)
+		return out;
+	auto reader = BitstreamReader<Series7>::InitWithBytes(file->as_bytes());
+	EXPECT_TRUE(reader) << path;
+	if (!reader)
+		return out;
+	Series7::ConfigurationPackage packets;
+	for (const auto& p : *reader)
+		packets.emplace_back(new ConfigurationPacket<Reg>(
+		    p.header_type(), p.opcode(), p.address(), p.data()));
+	size_t segment = 0;
+	for (size_t k = 0; k < packets.size(); ++k) {
+		const auto& p = *packets[k];
+		if (p.opcode() != ConfigurationPacket<Reg>::Opcode::Write ||
+		    p.address() != Reg::CRC || p.data().size() != 1)
+			continue;
+		Series7::ConfigurationPackage prefix;
+		for (size_t i = whole_prefix ? 0 : segment; i < k; ++i) {
+			const auto& q = *packets[i];
+			prefix.emplace_back(new ConfigurationPacket<Reg>(
+			    q.header_type(), q.opcode(), q.address(), q.data()));
+		}
+		const uint32_t model =
+		    Configuration<Series7>::computeStreamCrc(prefix);
+		++out.writes;
+		if (model == p.data()[0])
+			++out.matched;
+		else
+			out.mismatches.push_back({p.data()[0], model});
+		out.last_vendor = p.data()[0];
+		segment = k;
+	}
+	if (out.writes) {
+		size_t last = packets.size();
+		while (last-- > 0)
+			if (packets[last]->address() == Reg::CRC &&
+			    packets[last]->opcode() ==
+			        ConfigurationPacket<Reg>::Opcode::Write)
+				break;
+		Series7::ConfigurationPackage prefix;
+		for (size_t i = 0; i < last; ++i) {
+			const auto& q = *packets[i];
+			prefix.emplace_back(new ConfigurationPacket<Reg>(
+			    q.header_type(), q.opcode(), q.address(), q.data()));
+		}
+		out.last_from_prefix =
+		    Configuration<Series7>::computeStreamCrc(prefix);
+	}
+	return out;
+}
+
+}  // namespace
+
+TEST(ConfigurationTest, StreamCrcMatchesEveryVendorCrcWrite) {
+	struct Case {
+		const char* path;
+		bool whole_prefix;
+		size_t writes;
+	};
+	for (const Case& c :
+	     {Case{"configuration_test.bit", true, 2},
+	      Case{"configuration_test.perframecrc.bit", false, 5415},
+	      Case{"configuration_test_type_1.bit", false, 5415}}) {
+		auto got = GradeVendorCrcWrites(c.path, c.whole_prefix);
+		EXPECT_EQ(got.writes, c.writes) << c.path;
+		EXPECT_EQ(got.matched, got.writes) << c.path;
+		for (const auto& m : got.mismatches)
+			ADD_FAILURE() << c.path << ": vendor CRC 0x" << std::hex
+			              << m.first << ", model 0x" << m.second;
+		EXPECT_EQ(got.last_from_prefix, got.last_vendor) << c.path;
+	}
+}
+
+TEST(ConfigurationTest, StreamCrcModelDoesNotCoverTheDebugBitstream) {
+	auto got = GradeVendorCrcWrites("configuration_test.debug.bit", true);
+	EXPECT_EQ(got.writes, 2u);
+	EXPECT_EQ(got.matched, 1u);
+	ASSERT_EQ(got.mismatches.size(), 1u);
+	EXPECT_EQ(got.mismatches[0].first, 0x4e23c07cu);
+	EXPECT_EQ(got.mismatches[0].second, 0x02b690f0u);
+}
+
 // Unit 6.2 step 5, the algorithm itself. The expected value is computed by an
 // independent implementation (scripts/bit-packets.py, whose own CRC is checked
 // against prjxray's crc_test.cc vectors) over the same seven register writes:
