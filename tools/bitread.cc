@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <set>
 #include <string>
@@ -75,6 +77,23 @@ struct BitReader {
 	template <typename T>
 	int operator()(T& arg) {
 		using ArchType = std::decay_t<decltype(arg)>;
+		static const uint8_t kSync[] = {0xAA, 0x99, 0x55, 0x66};
+		auto sync = std::search(bytes_.begin(), bytes_.end(),
+		                        std::begin(kSync), std::end(kSync));
+		if (sync != bytes_.end()) {
+			const size_t after =
+			    bytes_.end() - (sync + sizeof(kSync));
+			const size_t word = sizeof(typename ArchType::WordType);
+			if (after % word != 0) {
+				std::cerr << "Input is not a configuration stream: "
+				          << "its first sync word is at byte "
+				          << (sync - bytes_.begin()) << " and the "
+				          << after << " byte(s) after it are not a "
+				          << "whole number of " << word
+				          << "-byte words." << std::endl;
+				return 1;
+			}
+		}
 		auto reader =
 		    xilinx::BitstreamReader<ArchType>::InitWithBytes(bytes_);
 		if (!reader) {
