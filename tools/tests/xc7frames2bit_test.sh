@@ -49,7 +49,15 @@ partial=(--partial_bitstream --prepass off --frm_file "$tmp/rowend.frm")
 run rowend-pad2 accept "${partial[@]}" --pad_frames 2
 run rowend-pad1 accept "${partial[@]}" --pad_frames 1
 run rowend-pad0 refuse "${partial[@]}" --pad_frames 0
-run rowend-default-pad refuse "${partial[@]}"
+run rowend-default-pad accept "${partial[@]}" --raw
+cp "$tmp/out.bit" "$tmp/rowend-default.bit" 2>/dev/null
+run rowend-pad2-raw accept "${partial[@]}" --raw --pad_frames 2
+if cmp -s "$tmp/rowend-default.bit" "$tmp/out.bit"; then
+	echo "ok   rowend-default-pad: same bytes as --pad_frames 2"
+else
+	echo "FAIL rowend-default-pad: differs from --pad_frames 2"
+	failures=$((failures + 1))
+fi
 run rowend-pad3-noverify refuse "${partial[@]}" --pad_frames 3 --noverify
 run rowend-pad4-noverify refuse "${partial[@]}" --pad_frames 4 --noverify
 

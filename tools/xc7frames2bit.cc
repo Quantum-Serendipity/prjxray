@@ -51,7 +51,7 @@ DEFINE_bool(partial_bitstream,
             "--roi-strict to produce that .frm, and note that plain --roi is "
             "a union rather than a filter.");
 DEFINE_uint32(pad_frames,
-              0,
+              2,
               "ROW-END PAD SLOTS: zero frames appended to a FAR block of a "
               "partial bitstream that ends at a row or block-type boundary -- "
               "the one place the device's frame-address counter has dummy "
@@ -65,10 +65,11 @@ DEFINE_uint32(pad_frames,
               "OUTSIDE the pblock -- an earlier version of this text read that "
               "frame as region content and concluded 'no pad', which is how a "
               "stream that never commits its own last frame passed every "
-              "check this tool had. 2 reproduces Vivado's pad slots. 0, the "
-              "default, suits only a partial with no row-end block: a "
-              "row-end block with no pad never commits its last frame, and "
-              "is refused.");
+              "check this tool had. 2, the default, reproduces Vivado's pad "
+              "slots, in its partials and in every full stream's row ends. 1 "
+              "is accepted and has no vendor or silicon record at a row end. "
+              "0 suits only a partial with no row-end block: a row-end block "
+              "with no pad never commits its last frame, and is refused.");
 DEFINE_uint32(expected_frames,
               0,
               "If non-zero, fail unless the partial bitstream writes exactly "
