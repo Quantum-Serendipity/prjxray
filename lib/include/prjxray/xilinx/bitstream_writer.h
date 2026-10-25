@@ -16,6 +16,9 @@
 #define PRJXRAY_LIB_XILINX_BITSTREAM_WRITER_H
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <fstream>
 #include <memory>
 #include <vector>
@@ -156,15 +159,24 @@ class BitstreamWriter {
 	iterator end();
 
        private:
+	static typename packet_iterator::state_t first_state(
+	    const ConfigurationPacket<typename ArchType::ConfRegType>& packet) {
+		return packet.header_type() == 0 && !packet.data().empty()
+		           ? packet_iterator::STATE_DATA
+		           : packet_iterator::STATE_HEADER;
+	}
+
 	static header_t header_;
 	const packets_t& packets_;
 
 	// Creates a Xilinx bit header which is mostly a
 	// Tag-Length-Value(TLV) format documented here:
 	// http://www.fpga-faq.com/FAQ_Pages/0026_Tell_me_about_bit_files.htm
-	BitstreamHeader create_header(const std::string& part_name,
-	                              const std::string& frames_file_name,
-	                              const std::string& generator_name);
+	static bool create_header(const std::string& part_name,
+	                          const std::string& frames_file_name,
+	                          const std::string& generator_name,
+	                          BitstreamHeader* out,
+	                          std::string* error);
 };
 
 template <typename ArchType>
@@ -185,8 +197,15 @@ int BitstreamWriter<ArchType>::writeBitstream(
 	std::ofstream::pos_type end_of_header_pos = out_file.tellp();
 	std::ofstream::pos_type header_data_length_pos = end_of_header_pos;
 	if (!raw) {
-		BitstreamHeader bit_header(
-		    create_header(part_name, frames_file, generator_name));
+		BitstreamHeader bit_header;
+		std::string header_error;
+		if (!create_header(part_name, frames_file, generator_name,
+		                   &bit_header, &header_error)) {
+			std::cerr << header_error << std::endl;
+			out_file.close();
+			std::remove(output_file.c_str());
+			return 1;
+		}
 		out_file.write(
 		    reinterpret_cast<const char*>(bit_header.data()),
 		    bit_header.size());
@@ -228,55 +247,58 @@ int BitstreamWriter<ArchType>::writeBitstream(
 }
 
 template <typename ArchType>
-typename BitstreamWriter<ArchType>::BitstreamHeader
-BitstreamWriter<ArchType>::create_header(const std::string& part_name,
-                                         const std::string& frames_file_name,
-                                         const std::string& generator_name) {
-	// Sync header
+bool BitstreamWriter<ArchType>::create_header(
+    const std::string& part_name,
+    const std::string& frames_file_name,
+    const std::string& generator_name,
+    BitstreamHeader* out,
+    std::string* error) {
+	absl::Time build_time = absl::Now();
+	if (const char* epoch = std::getenv("SOURCE_DATE_EPOCH")) {
+		const std::string text(epoch);
+		if (text.empty() || text.size() > 18 ||
+		    text.find_first_not_of("0123456789") != std::string::npos) {
+			*error = "SOURCE_DATE_EPOCH is set to '" + text +
+			         "', which is not a non-negative decimal count "
+			         "of seconds; no bitstream written.";
+			return false;
+		}
+		build_time = absl::FromUnixSeconds(std::stoll(text));
+	}
+
+	const size_t slash = frames_file_name.find_last_of('/');
+	const std::string frames_base =
+	    slash == std::string::npos ? frames_file_name
+	                               : frames_file_name.substr(slash + 1);
+
 	BitstreamHeader bit_header{0x0,  0x9,  0x0f, 0xf0, 0x0f, 0xf0, 0x0f,
-	                           0xf0, 0x0f, 0xf0, 0x00, 0x00, 0x01, 'a'};
-	auto build_source =
-	    absl::StrCat(frames_file_name, ";Generator=" + generator_name);
-	bit_header.push_back(
-	    static_cast<uint8_t>((build_source.size() + 1) >> 8));
-	bit_header.push_back(static_cast<uint8_t>(build_source.size() + 1));
-	bit_header.insert(bit_header.end(), build_source.begin(),
-	                  build_source.end());
-	bit_header.push_back(0x0);
-
-	// Source file.
-	bit_header.push_back('b');
-	bit_header.push_back(static_cast<uint8_t>((part_name.size() + 1) >> 8));
-	bit_header.push_back(static_cast<uint8_t>(part_name.size() + 1));
-	bit_header.insert(bit_header.end(), part_name.begin(), part_name.end());
-	bit_header.push_back(0x0);
-
-	// Build timestamp.
-	auto build_time = absl::Now();
-	auto build_date_string =
-	    absl::FormatTime("%E4Y/%m/%d", build_time, absl::UTCTimeZone());
-	auto build_time_string =
-	    absl::FormatTime("%H:%M:%S", build_time, absl::UTCTimeZone());
-
-	bit_header.push_back('c');
-	bit_header.push_back(
-	    static_cast<uint8_t>((build_date_string.size() + 1) >> 8));
-	bit_header.push_back(
-	    static_cast<uint8_t>(build_date_string.size() + 1));
-	bit_header.insert(bit_header.end(), build_date_string.begin(),
-	                  build_date_string.end());
-	bit_header.push_back(0x0);
-
-	bit_header.push_back('d');
-	bit_header.push_back(
-	    static_cast<uint8_t>((build_time_string.size() + 1) >> 8));
-	bit_header.push_back(
-	    static_cast<uint8_t>(build_time_string.size() + 1));
-	bit_header.insert(bit_header.end(), build_time_string.begin(),
-	                  build_time_string.end());
-	bit_header.push_back(0x0);
+	                           0xf0, 0x0f, 0xf0, 0x00, 0x00, 0x01};
+	auto field = [&bit_header, error](char tag, const std::string& value) {
+		const size_t length = value.size() + 1;
+		if (length > 0xffff) {
+			*error = std::string("The .bit header field '") + tag +
+			         "' would be " + std::to_string(length) +
+			         " bytes, and its length is a 16-bit count; no "
+			         "bitstream written.";
+			return false;
+		}
+		bit_header.push_back(static_cast<uint8_t>(tag));
+		bit_header.push_back(static_cast<uint8_t>(length >> 8));
+		bit_header.push_back(static_cast<uint8_t>(length));
+		bit_header.insert(bit_header.end(), value.begin(), value.end());
+		bit_header.push_back(0x0);
+		return true;
+	};
+	if (!field('a', absl::StrCat(frames_base, ";Generator=", generator_name)) ||
+	    !field('b', part_name) ||
+	    !field('c', absl::FormatTime("%E4Y/%m/%d", build_time,
+	                                 absl::UTCTimeZone())) ||
+	    !field('d', absl::FormatTime("%H:%M:%S", build_time,
+	                                 absl::UTCTimeZone())))
+		return false;
 	bit_header.insert(bit_header.end(), {'e', 0x0, 0x0, 0x0, 0x0});
-	return bit_header;
+	*out = std::move(bit_header);
+	return true;
 }
 
 template <typename ArchType>
@@ -287,8 +309,7 @@ BitstreamWriter<ArchType>::iterator::packet_begin() {
 	    **itr_packets_;
 
 	return BitstreamWriter::packet_iterator(
-	    &packet, BitstreamWriter::packet_iterator::STATE_HEADER,
-	    packet.data().begin());
+	    &packet, first_state(packet), packet.data().begin());
 }
 
 template <typename ArchType>
@@ -376,9 +397,8 @@ BitstreamWriter<ArchType>::begin() {
 		// FIXME: de-duplicate this
 		const ConfigurationPacket<typename ArchType::ConfRegType>&
 		    packet = **itr_packets;
-		packet_iterator packet_itr =
-		    packet_iterator(&packet, packet_iterator::STATE_HEADER,
-		                    packet.data().begin());
+		packet_iterator packet_itr = packet_iterator(
+		    &packet, first_state(packet), packet.data().begin());
 		op_packet_itr = packet_itr;
 	}
 	return iterator(header_.begin(), packets_, itr_packets, op_packet_itr);

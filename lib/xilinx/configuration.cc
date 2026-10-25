@@ -484,6 +484,14 @@ uint32_t Configuration<Series7>::computeStreamCrc(
 	using ConfigurationRegister = Series7::ConfRegType;
 	uint32_t crc = 0;
 	for (const auto& packet : packets) {
+		if (packet->header_type() == 0) {
+			for (uint32_t word : packet->data())
+				crc = xc7series::icap_crc(
+				    static_cast<uint32_t>(
+				        ConfigurationRegister::FDRI),
+				    word, crc);
+			continue;
+		}
 		if (packet->opcode() !=
 		    ConfigurationPacket<ConfigurationRegister>::Opcode::Write)
 			continue;
@@ -494,6 +502,8 @@ uint32_t Configuration<Series7>::computeStreamCrc(
 			crc = 0;
 			continue;
 		}
+		if (reg == ConfigurationRegister::LOUT)
+			continue;
 		// CMD:RCRC accumulates its own write and THEN resets, which is
 		// the same final value as "reset and consume the write" and is
 		// NOT the same as resetting first: 6/6 vendor values this way,
@@ -684,10 +694,22 @@ CompressedFrameData Configuration<Series7>::createCompressedFrameData(
 	size_t i = 0;
 	while (i < n) {
 		size_t j = i;
-		while (j < n &&
-		       Series7SameFrameGroup(seq[i].first, seq[j].first) &&
-		       !Series7FrameIsZero(*seq[j].second))
-			++j;
+		for (;;) {
+			while (j < n &&
+			       Series7SameFrameGroup(seq[i].first,
+			                             seq[j].first) &&
+			       !Series7FrameIsZero(*seq[j].second))
+				++j;
+			if (j + 1 < n &&
+			    Series7SameFrameGroup(seq[i].first, seq[j].first) &&
+			    Series7SameFrameGroup(seq[i].first,
+			                          seq[j + 1].first) &&
+			    !Series7FrameIsZero(*seq[j + 1].second)) {
+				++j;
+				continue;
+			}
+			break;
+		}
 		size_t k = j;
 		while (k < n &&
 		       Series7SameFrameGroup(seq[i].first, seq[k].first) &&

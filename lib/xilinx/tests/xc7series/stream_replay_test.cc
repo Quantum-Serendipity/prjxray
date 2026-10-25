@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <prjxray/memory_mapped_file.h>
 #include <prjxray/xilinx/architectures.h>
 #include <prjxray/xilinx/bitstream_writer.h>
 #include <prjxray/xilinx/configuration.h>
@@ -185,6 +186,50 @@ TEST(StreamReplayTest, CompressedStreamCommitsEveryFrameOnce) {
 	    << error;
 	ExpectEachFrameCommittedOnce(replay, frames);
 	EXPECT_EQ(replay.mfw_replays, 10u);
+}
+
+TEST(StreamReplayTest, CompressedEncodingFoldsALoneMidGroupZeroFrameIntoTheBurst) {
+	auto part = absl::optional<xc7series::Part>(ReplayTestPart());
+	const std::vector<uint32_t> fills = {
+	    0xA1, 0,    0xA3, 0xA4, 0,    0,    0xA7, 0xA8, 0,    0xC2,
+	    0xC3, 0xC4, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0};
+	auto frames = AllFrames(*part, fills);
+	auto blocks =
+	    Configuration<Series7>::createCompressedFrameData(frames, part);
+	ASSERT_EQ(blocks.size(), 4u);
+
+	EXPECT_EQ(blocks[0].far, Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0));
+	EXPECT_TRUE(blocks[0].mfw);
+	EXPECT_EQ(blocks[0].words.size(), 5u * 101);
+	EXPECT_EQ(blocks[0].replay,
+	          std::vector<uint32_t>(
+	              {Far(xc7series::BlockType::CLB_IO_CLK, 0, 1, 1)}));
+
+	EXPECT_FALSE(blocks[1].mfw);
+	EXPECT_EQ(blocks[1].words.size(), 4u * 101);
+
+	EXPECT_EQ(blocks[2].far, Far(xc7series::BlockType::CLB_IO_CLK, 1, 0, 0));
+	EXPECT_FALSE(blocks[2].mfw);
+	EXPECT_EQ(blocks[2].words.size(), 6u * 101);
+
+	EXPECT_TRUE(blocks[3].mfw);
+	EXPECT_EQ(blocks[3].words.size(), 8u * 101);
+	EXPECT_TRUE(blocks[3].replay.empty());
+
+	ASSERT_EQ(Configuration<Series7>::checkCompressedFrameSet(blocks,
+	                                                          frames, part),
+	          20u);
+	FullStreamOptions options;
+	options.compressed = &blocks;
+	Series7::ConfigurationPackage packets;
+	Configuration<Series7>::createConfigurationPackage(
+	    packets, Configuration<Series7>::PacketData(), part, options);
+	xc7series::StreamReplay replay;
+	std::string error;
+	ASSERT_TRUE(xc7series::ReplayConfigurationStream(
+	    Serialize(packets), *part, &replay, &error))
+	    << error;
+	ExpectEachFrameCommittedOnce(replay, frames);
 }
 
 TEST(StreamReplayTest, CompressedStreamWithFarBeforeWcfgIsRefused) {
@@ -582,4 +627,110 @@ TEST(StreamReplayTest, ReplayCheckRefusesWrongCountsAndPayloads) {
 	EXPECT_NE(error.find("committed 2 time(s), expected 1"),
 	          std::string::npos)
 	    << error;
+}
+
+namespace {
+
+std::vector<uint8_t> ReadFile(const char* path) {
+	auto file = prjxray::MemoryMappedFile::InitWithFile(path);
+	EXPECT_TRUE(file) << path;
+	if (!file)
+		return {};
+	auto bytes = file->as_bytes();
+	return std::vector<uint8_t>(bytes.begin(), bytes.end());
+}
+
+std::map<uint32_t, std::vector<std::vector<uint32_t>>> ByAddress(
+    const std::vector<xc7series::ReplayedFrame>& frames) {
+	std::map<uint32_t, std::vector<std::vector<uint32_t>>> out;
+	for (const auto& f : frames)
+		out[f.address].push_back(f.words);
+	return out;
+}
+
+}  // namespace
+
+TEST(StreamReplayTest, PerFrameCrcStreamCommitsWhatThePlainStreamCommits) {
+	auto part = xc7series::Part::FromFile("configuration_test.yaml");
+	ASSERT_TRUE(part);
+
+	xc7series::StreamReplay plain;
+	std::string error;
+	ASSERT_TRUE(xc7series::ReplayConfigurationStream(
+	    ReadFile("configuration_test.bit"), *part, &plain, &error))
+	    << error;
+	EXPECT_TRUE(plain.discarded.empty());
+
+	xc7series::StreamReplay per_frame;
+	ASSERT_TRUE(xc7series::ReplayConfigurationStream(
+	    ReadFile("configuration_test.perframecrc.bit"), *part, &per_frame,
+	    &error))
+	    << error;
+	EXPECT_TRUE(per_frame.desynced);
+	EXPECT_EQ(per_frame.dummy_frames, 0u);
+
+	auto want = ByAddress(plain.committed);
+	auto got = ByAddress(per_frame.committed);
+	EXPECT_EQ(got.size(), want.size());
+	size_t once = 0;
+	for (const auto& w : want) {
+		auto it = got.find(w.first);
+		ASSERT_NE(it, got.end()) << std::hex << w.first;
+		ASSERT_EQ(it->second.size(), 1u) << std::hex << w.first;
+		EXPECT_EQ(it->second, w.second) << std::hex << w.first;
+		++once;
+	}
+	EXPECT_EQ(once, 5408u);
+
+	ASSERT_EQ(per_frame.discarded.size(), 6u);
+	for (const auto& d : per_frame.discarded) {
+		auto it = got.find(d.address);
+		ASSERT_NE(it, got.end()) << std::hex << d.address;
+		EXPECT_EQ(d.words, it->second[0]) << std::hex << d.address;
+	}
+	EXPECT_EQ(per_frame.discarded.back().address, 0x00c0017fu);
+}
+
+TEST(StreamReplayTest, PerFrameCrcGrammarRefusesAFrameWithNoFarMarker) {
+	auto part = absl::optional<xc7series::Part>(ReplayTestPart());
+	auto a0 = Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0);
+	auto a1 = Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 1);
+	auto stream = [&](bool marker, bool two_frames,
+	                  uint32_t mask = 0x00200000) {
+		Stream s;
+		s.Write(6, {mask}).Write(24, {0x00200000});
+		s.Cmd(xc7series::Command::WCFG).FarWrite(a0);
+		if (two_frames)
+			s.Write(2, Concat({Frame(0xA0), Frame(0xA1)}));
+		else
+			s.Write(2, Frame(0xA0));
+		s.FarWrite(a0).Write(0, {0});
+		s.Write(2, Frame(0xA1));
+		if (marker)
+			s.FarWrite(a1);
+		s.Write(0, {0}).Write(2, Frame(0xA1)).FarWrite(a1);
+		return s.Bytes();
+	};
+	xc7series::StreamReplay replay;
+	std::string error;
+	ASSERT_TRUE(xc7series::ReplayConfigurationStream(stream(true, false),
+	                                                 *part, &replay, &error))
+	    << error;
+	ASSERT_EQ(replay.committed.size(), 2u);
+	EXPECT_EQ(replay.committed[0].address, a0);
+	EXPECT_EQ(replay.committed[0].words, Frame(0xA0));
+	EXPECT_EQ(replay.committed[1].address, a1);
+	EXPECT_EQ(replay.committed[1].words, Frame(0xA1));
+
+	EXPECT_FALSE(xc7series::ReplayConfigurationStream(
+	    stream(false, false), *part, &replay, &error));
+	EXPECT_NE(error.find("FAR marker"), std::string::npos) << error;
+	EXPECT_FALSE(xc7series::ReplayConfigurationStream(
+	    stream(true, true), *part, &replay, &error));
+	EXPECT_NE(error.find("one frame"), std::string::npos) << error;
+
+	ASSERT_TRUE(xc7series::ReplayConfigurationStream(
+	    stream(true, false, 0xffdfffff), *part, &replay, &error))
+	    << error;
+	EXPECT_TRUE(replay.committed.empty());
 }

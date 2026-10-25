@@ -7,6 +7,7 @@
  *
  * SPDX-License-Identifier: ISC
  */
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <iostream>
@@ -17,6 +18,7 @@
 #include <prjxray/memory_mapped_file.h>
 #include <prjxray/xilinx/architectures.h>
 #include <prjxray/xilinx/bitstream_reader.h>
+#include <prjxray/xilinx/bitstream_writer.h>
 #include <prjxray/xilinx/configuration.h>
 #include <prjxray/xilinx/configuration_packet.h>
 #include <prjxray/xilinx/configuration_packet_with_payload.h>
@@ -1466,13 +1468,89 @@ TEST(ConfigurationTest, StreamCrcMatchesEveryVendorCrcWrite) {
 	}
 }
 
-TEST(ConfigurationTest, StreamCrcModelDoesNotCoverTheDebugBitstream) {
-	auto got = GradeVendorCrcWrites("configuration_test.debug.bit", true);
-	EXPECT_EQ(got.writes, 2u);
-	EXPECT_EQ(got.matched, 1u);
-	ASSERT_EQ(got.mismatches.size(), 1u);
-	EXPECT_EQ(got.mismatches[0].first, 0x4e23c07cu);
-	EXPECT_EQ(got.mismatches[0].second, 0x02b690f0u);
+TEST(ConfigurationTest, StreamCrcModelCoversTheDebugBitstream) {
+	auto debug = GradeVendorCrcWrites("configuration_test.debug.bit", true);
+	EXPECT_EQ(debug.writes, 2u);
+	EXPECT_EQ(debug.matched, 2u);
+	for (const auto& m : debug.mismatches)
+		ADD_FAILURE() << "vendor CRC 0x" << std::hex << m.first
+		              << ", model 0x" << m.second;
+	EXPECT_EQ(debug.last_from_prefix, debug.last_vendor);
+
+	auto plain = GradeVendorCrcWrites("configuration_test.bit", true);
+	ASSERT_EQ(plain.writes, 2u);
+	EXPECT_EQ(debug.last_vendor, plain.last_vendor);
+}
+
+TEST(ConfigurationTest, StreamCrcCountsAHeaderlessWordAsFdriAndSkipsLout) {
+	using Reg = Series7::ConfRegType;
+	std::vector<uint32_t> frame(101, 0x5a5a0000u);
+	std::vector<uint32_t> padded(frame);
+	padded.insert(padded.end(), 202, 0u);
+	std::vector<uint32_t> zero_word{0u};
+
+	Series7::ConfigurationPackage burst;
+	burst.emplace_back(new ConfigurationPacket<Reg>(
+	    1, ConfigurationPacket<Reg>::Opcode::Write, Reg::FDRI,
+	    absl::MakeSpan(padded)));
+
+	Series7::ConfigurationPackage debug;
+	debug.emplace_back(new ConfigurationPacket<Reg>(
+	    1, ConfigurationPacket<Reg>::Opcode::Write, Reg::FDRI,
+	    absl::MakeSpan(frame)));
+	debug.emplace_back(new ConfigurationPacketWithPayload<1, Reg>(
+	    ConfigurationPacket<Reg>::Opcode::Write, Reg::LOUT, {0x00c0017fu}));
+	for (int i = 0; i < 202; ++i)
+		debug.emplace_back(new ConfigurationPacket<Reg>(
+		    0, ConfigurationPacket<Reg>::Opcode::NOP, Reg::CRC,
+		    absl::MakeSpan(zero_word)));
+
+	const uint32_t want = Configuration<Series7>::computeStreamCrc(burst);
+	EXPECT_NE(want, 0u);
+	EXPECT_EQ(Configuration<Series7>::computeStreamCrc(debug), want);
+
+	Series7::ConfigurationPackage no_pad;
+	no_pad.emplace_back(new ConfigurationPacket<Reg>(
+	    1, ConfigurationPacket<Reg>::Opcode::Write, Reg::FDRI,
+	    absl::MakeSpan(frame)));
+	EXPECT_NE(Configuration<Series7>::computeStreamCrc(no_pad), want);
+}
+
+TEST(ConfigurationTest, ReaderSurfacesHeaderlessWordsAndTheWriterRoundTripsThem) {
+	auto file =
+	    prjxray::MemoryMappedFile::InitWithFile("configuration_test.debug.bit");
+	ASSERT_TRUE(file);
+	auto reader = BitstreamReader<Series7>::InitWithBytes(file->as_bytes());
+	ASSERT_TRUE(reader);
+
+	using Reg = Series7::ConfRegType;
+	Series7::ConfigurationPackage packets;
+	size_t headerless = 0;
+	for (const auto& p : *reader) {
+		if (p.header_type() == 0) {
+			++headerless;
+			EXPECT_EQ(p.data().size(), 1u);
+		}
+		packets.emplace_back(new ConfigurationPacket<Reg>(
+		    p.header_type(), p.opcode(), p.address(), p.data()));
+	}
+	EXPECT_EQ(headerless, 1212u);
+
+	BitstreamWriter<Series7> writer(packets);
+	std::vector<uint32_t> written(writer.begin(), writer.end());
+	auto sync = std::find(written.begin(), written.end(), 0xAA995566u);
+	ASSERT_NE(sync, written.end());
+	std::vector<uint32_t> body(sync + 1, written.end());
+	EXPECT_EQ(body, reader->words());
+
+	std::vector<uint32_t> words{0x00001234u};
+	auto parsed = ConfigurationPacket<Reg>::InitWithWords(
+	    absl::MakeSpan(words));
+	ASSERT_TRUE(parsed.second);
+	EXPECT_EQ(parsed.second->header_type(), 0u);
+	ASSERT_EQ(parsed.second->data().size(), 1u);
+	EXPECT_EQ(parsed.second->data()[0], 0x00001234u);
+	EXPECT_TRUE(parsed.first.empty());
 }
 
 // Unit 6.2 step 5, the algorithm itself. The expected value is computed by an

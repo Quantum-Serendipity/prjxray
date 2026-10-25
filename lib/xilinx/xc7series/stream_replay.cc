@@ -28,8 +28,12 @@ constexpr size_t kMfwrWordsAfterFar = 4;
 constexpr uint32_t kRegFar = 1;
 constexpr uint32_t kRegFdri = 2;
 constexpr uint32_t kRegCmd = 4;
+constexpr uint32_t kRegMask = 6;
 constexpr uint32_t kRegMfwr = 10;
 constexpr uint32_t kRegIdcode = 12;
+constexpr uint32_t kRegCtl1 = 24;
+
+constexpr uint32_t kCtl1PerFrameCrc = 1u << 21;
 
 constexpr uint32_t kCmdWcfg = 1;
 constexpr uint32_t kCmdMfw = 2;
@@ -81,6 +85,16 @@ class Replayer {
 				return WriteCmd(payload);
 			case kRegMfwr:
 				return WriteMfwr(payload);
+			case kRegMask:
+				if (payload.size() != 1)
+					return Fail("a MASK write is not one word");
+				mask_ = payload[0];
+				return true;
+			case kRegCtl1:
+				if (payload.size() != 1)
+					return Fail("a CTL1 write is not one word");
+				ctl1_ = (ctl1_ & ~mask_) | (payload[0] & mask_);
+				return true;
 			case kRegIdcode:
 				if (payload.size() != 1)
 					return Fail(
@@ -159,10 +173,29 @@ class Replayer {
 		return p;
 	}
 
+	bool per_frame_crc() const { return ctl1_ & kCtl1PerFrameCrc; }
+
 	bool WriteFar(const std::vector<uint32_t>& payload) {
 		if (payload.size() != 1)
 			return Fail("a FAR write is not one word");
 		++out_->far_writes;
+		if (per_frame_crc() && cmd_ != kCmdMfw) {
+			Position at;
+			at.address = payload[0];
+			at.valid = part_.IsValidFrameAddress(FrameAddress(at.address));
+			if (pending_) {
+				if (!at.valid)
+					return Fail(
+					    "a per-frame-CRC FAR marker names " +
+					    Hex(at.address) +
+					    ", which is not a frame address of the "
+					    "part");
+				pending_at_ = at;
+				marker_seen_ = true;
+			}
+			position_ = at;
+			return true;
+		}
 		DropPending();
 		position_ = Position();
 		position_.address = payload[0];
@@ -199,6 +232,8 @@ class Replayer {
 			return Fail("an FDRI write of " +
 			            std::to_string(payload.size()) +
 			            " words is not a whole number of frames");
+		if (per_frame_crc())
+			return WritePerFrameFdri(payload);
 		for (size_t f = 0; f < payload.size(); f += kWordsPerFrame) {
 			std::vector<uint32_t> frame(
 			    payload.begin() + f,
@@ -229,10 +264,40 @@ class Replayer {
 		return true;
 	}
 
+	bool WritePerFrameFdri(const std::vector<uint32_t>& payload) {
+		if (payload.size() != kWordsPerFrame)
+			return Fail(
+			    "a per-frame-CRC FDRI write of " +
+			    std::to_string(payload.size()) +
+			    " words; that grammar writes one frame at a time");
+		if (pending_) {
+			if (!marker_seen_)
+				return Fail(
+				    "a per-frame-CRC FDRI frame follows the frame "
+				    "for " +
+				    Hex(pending_at_.address) +
+				    " with no FAR marker between them");
+			Commit(pending_at_, frame_buffer_);
+		} else {
+			if (!position_.valid)
+				return Fail(
+				    "an FDRI write with no valid frame address in "
+				    "FAR (" +
+				    Hex(position_.address) + ")");
+			pending_at_ = position_;
+		}
+		frame_buffer_ = payload;
+		pending_ = true;
+		marker_seen_ = false;
+		return true;
+	}
+
 	bool WriteCmd(const std::vector<uint32_t>& payload) {
 		if (payload.size() != 1)
 			return Fail("a CMD write is not one word");
 		cmd_ = payload[0] & 0x1f;
+		if (cmd_ == kCmdWcfg && per_frame_crc())
+			DropPending();
 		if (cmd_ == kCmdDesync) {
 			DropPending();
 			desynced_ = true;
@@ -285,6 +350,9 @@ class Replayer {
 	bool expect_mfwr_ = false;
 	bool desynced_ = false;
 	bool idcode_seen_ = false;
+	uint32_t mask_ = 0;
+	uint32_t ctl1_ = 0;
+	bool marker_seen_ = false;
 };
 
 }  // namespace
