@@ -188,6 +188,50 @@ TEST(StreamReplayTest, CompressedStreamCommitsEveryFrameOnce) {
 	EXPECT_EQ(replay.mfw_replays, 10u);
 }
 
+TEST(StreamReplayTest, CompressedEncodingFoldsALoneMidGroupZeroFrameIntoTheBurst) {
+	auto part = absl::optional<xc7series::Part>(ReplayTestPart());
+	const std::vector<uint32_t> fills = {
+	    0xA1, 0,    0xA3, 0xA4, 0,    0,    0xA7, 0xA8, 0,    0xC2,
+	    0xC3, 0xC4, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0};
+	auto frames = AllFrames(*part, fills);
+	auto blocks =
+	    Configuration<Series7>::createCompressedFrameData(frames, part);
+	ASSERT_EQ(blocks.size(), 4u);
+
+	EXPECT_EQ(blocks[0].far, Far(xc7series::BlockType::CLB_IO_CLK, 0, 0, 0));
+	EXPECT_TRUE(blocks[0].mfw);
+	EXPECT_EQ(blocks[0].words.size(), 5u * 101);
+	EXPECT_EQ(blocks[0].replay,
+	          std::vector<uint32_t>(
+	              {Far(xc7series::BlockType::CLB_IO_CLK, 0, 1, 1)}));
+
+	EXPECT_FALSE(blocks[1].mfw);
+	EXPECT_EQ(blocks[1].words.size(), 4u * 101);
+
+	EXPECT_EQ(blocks[2].far, Far(xc7series::BlockType::CLB_IO_CLK, 1, 0, 0));
+	EXPECT_FALSE(blocks[2].mfw);
+	EXPECT_EQ(blocks[2].words.size(), 6u * 101);
+
+	EXPECT_TRUE(blocks[3].mfw);
+	EXPECT_EQ(blocks[3].words.size(), 8u * 101);
+	EXPECT_TRUE(blocks[3].replay.empty());
+
+	ASSERT_EQ(Configuration<Series7>::checkCompressedFrameSet(blocks,
+	                                                          frames, part),
+	          20u);
+	FullStreamOptions options;
+	options.compressed = &blocks;
+	Series7::ConfigurationPackage packets;
+	Configuration<Series7>::createConfigurationPackage(
+	    packets, Configuration<Series7>::PacketData(), part, options);
+	xc7series::StreamReplay replay;
+	std::string error;
+	ASSERT_TRUE(xc7series::ReplayConfigurationStream(
+	    Serialize(packets), *part, &replay, &error))
+	    << error;
+	ExpectEachFrameCommittedOnce(replay, frames);
+}
+
 TEST(StreamReplayTest, CompressedStreamWithFarBeforeWcfgIsRefused) {
 	auto part = absl::optional<xc7series::Part>(ReplayTestPart());
 	auto frames = AllFrames(*part, kZeroRunFills);

@@ -694,10 +694,22 @@ CompressedFrameData Configuration<Series7>::createCompressedFrameData(
 	size_t i = 0;
 	while (i < n) {
 		size_t j = i;
-		while (j < n &&
-		       Series7SameFrameGroup(seq[i].first, seq[j].first) &&
-		       !Series7FrameIsZero(*seq[j].second))
-			++j;
+		for (;;) {
+			while (j < n &&
+			       Series7SameFrameGroup(seq[i].first,
+			                             seq[j].first) &&
+			       !Series7FrameIsZero(*seq[j].second))
+				++j;
+			if (j + 1 < n &&
+			    Series7SameFrameGroup(seq[i].first, seq[j].first) &&
+			    Series7SameFrameGroup(seq[i].first,
+			                          seq[j + 1].first) &&
+			    !Series7FrameIsZero(*seq[j + 1].second)) {
+				++j;
+				continue;
+			}
+			break;
+		}
 		size_t k = j;
 		while (k < n &&
 		       Series7SameFrameGroup(seq[i].first, seq[k].first) &&
