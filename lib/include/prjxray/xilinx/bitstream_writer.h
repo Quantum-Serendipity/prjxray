@@ -156,6 +156,13 @@ class BitstreamWriter {
 	iterator end();
 
        private:
+	static typename packet_iterator::state_t first_state(
+	    const ConfigurationPacket<typename ArchType::ConfRegType>& packet) {
+		return packet.header_type() == 0 && !packet.data().empty()
+		           ? packet_iterator::STATE_DATA
+		           : packet_iterator::STATE_HEADER;
+	}
+
 	static header_t header_;
 	const packets_t& packets_;
 
@@ -287,8 +294,7 @@ BitstreamWriter<ArchType>::iterator::packet_begin() {
 	    **itr_packets_;
 
 	return BitstreamWriter::packet_iterator(
-	    &packet, BitstreamWriter::packet_iterator::STATE_HEADER,
-	    packet.data().begin());
+	    &packet, first_state(packet), packet.data().begin());
 }
 
 template <typename ArchType>
@@ -376,9 +382,8 @@ BitstreamWriter<ArchType>::begin() {
 		// FIXME: de-duplicate this
 		const ConfigurationPacket<typename ArchType::ConfRegType>&
 		    packet = **itr_packets;
-		packet_iterator packet_itr =
-		    packet_iterator(&packet, packet_iterator::STATE_HEADER,
-		                    packet.data().begin());
+		packet_iterator packet_itr = packet_iterator(
+		    &packet, first_state(packet), packet.data().begin());
 		op_packet_itr = packet_itr;
 	}
 	return iterator(header_.begin(), packets_, itr_packets, op_packet_itr);

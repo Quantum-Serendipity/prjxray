@@ -118,17 +118,11 @@ ConfigurationPacket<Series7ConfigurationRegister>::InitWithWords(
 	uint32_t header_type = bit_field_get(words[0], 31, 29);
 	switch (header_type) {
 		case NONE:
-			// Type 0 is emitted at the end of a configuration row
-			// when BITSTREAM.GENERAL.DEBUGBITSTREAM is set to YES.
-			// These seem to be padding that are interepreted as
-			// NOPs.  Since Type 0 packets don't exist according to
-			// UG470 and they seem to be zero-filled, just consume
-			// the bytes without generating a packet.
 			return {words.subspan(1),
 			        {{header_type,
 			          Opcode::NOP,
 			          ConfigurationRegister::CRC,
-			          {}}}};
+			          words.subspan(0, 1)}}};
 		case TYPE1: {
 			Opcode opcode = static_cast<Opcode>(
 			    bit_field_get(words[0], 28, 27));

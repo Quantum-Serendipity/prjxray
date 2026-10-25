@@ -484,6 +484,14 @@ uint32_t Configuration<Series7>::computeStreamCrc(
 	using ConfigurationRegister = Series7::ConfRegType;
 	uint32_t crc = 0;
 	for (const auto& packet : packets) {
+		if (packet->header_type() == 0) {
+			for (uint32_t word : packet->data())
+				crc = xc7series::icap_crc(
+				    static_cast<uint32_t>(
+				        ConfigurationRegister::FDRI),
+				    word, crc);
+			continue;
+		}
 		if (packet->opcode() !=
 		    ConfigurationPacket<ConfigurationRegister>::Opcode::Write)
 			continue;
@@ -494,6 +502,8 @@ uint32_t Configuration<Series7>::computeStreamCrc(
 			crc = 0;
 			continue;
 		}
+		if (reg == ConfigurationRegister::LOUT)
+			continue;
 		// CMD:RCRC accumulates its own write and THEN resets, which is
 		// the same final value as "reset and consume the write" and is
 		// NOT the same as resetting first: 6/6 vendor values this way,
