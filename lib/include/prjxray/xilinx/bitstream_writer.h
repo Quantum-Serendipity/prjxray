@@ -254,9 +254,10 @@ bool BitstreamWriter<ArchType>::create_header(
     BitstreamHeader* out,
     std::string* error) {
 	absl::Time build_time = absl::Now();
-	if (const char* epoch = std::getenv("SOURCE_DATE_EPOCH")) {
+	const char* epoch = std::getenv("SOURCE_DATE_EPOCH");
+	if (epoch && *epoch) {
 		const std::string text(epoch);
-		if (text.empty() || text.size() > 18 ||
+		if (text.size() > 18 ||
 		    text.find_first_not_of("0123456789") != std::string::npos) {
 			*error = "SOURCE_DATE_EPOCH is set to '" + text +
 			         "', which is not a non-negative decimal count "

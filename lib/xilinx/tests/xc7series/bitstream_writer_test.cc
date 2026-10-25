@@ -303,8 +303,10 @@ TEST(BitstreamWriterTest, HeaderRefusesABadEpochAndAnOverlongField) {
 	EXPECT_TRUE(bad.empty());
 	WriteWithEpoch("12abc", "design.frames", "xc7a100tfgg484", &rc);
 	EXPECT_EQ(rc, 1);
-	WriteWithEpoch("", "design.frames", "xc7a100tfgg484", &rc);
-	EXPECT_EQ(rc, 1);
+	auto empty = WriteWithEpoch("", "design.frames", "xc7a100tfgg484", &rc);
+	EXPECT_EQ(rc, 0);
+	EXPECT_FALSE(empty.empty());
+	EXPECT_EQ(HeaderText(empty).find("1970/01/01"), std::string::npos);
 
 	WriteWithEpoch("0", "design.frames", std::string(65534, 'p'), &rc);
 	EXPECT_EQ(rc, 0);
