@@ -158,6 +158,8 @@ BitstreamReader<ArchType>::InitWithBytes(T bitstream) {
 	absl::Span<typename T::value_type> bitstream_span(bitstream);
 	auto config_packets =
 	    bitstream_span.subspan(sync_pos - bitstream.begin());
+	if (config_packets.size() % sizeof(typename ArchType::WordType) != 0)
+		return absl::optional<BitstreamReader<ArchType>>();
 
 	// Convert the bytes into 32-bit or 16-bit in case of Spartan6,
 	// big-endian words.

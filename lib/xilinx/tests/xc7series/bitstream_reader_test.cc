@@ -98,3 +98,16 @@ TEST(BitstreamReaderTest, ParsesType2AfterType1Packet) {
 
 	EXPECT_EQ(++first_packet, reader->end());
 }
+
+TEST(BitstreamReaderTest, InitWithAPartialTrailingWordReturnsNullInsteadOfThrowing) {
+	std::vector<uint8_t> bitstream{0xAA, 0x99, 0x55, 0x66, 0x20, 0x00,
+	                               0x00, 0x00, 0x30};
+	absl::optional<BitstreamReader<Series7>> reader;
+	EXPECT_NO_THROW(reader = BitstreamReader<Series7>::InitWithBytes(bitstream));
+	EXPECT_FALSE(reader);
+
+	bitstream.pop_back();
+	reader = BitstreamReader<Series7>::InitWithBytes(bitstream);
+	ASSERT_TRUE(reader);
+	EXPECT_EQ(reader->words().size(), 1u);
+}
