@@ -8,11 +8,17 @@
  * SPDX-License-Identifier: ISC
  */
 #include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <string>
 
 #include <gtest/gtest.h>
 #include <prjxray/xilinx/bitstream_reader.h>
 #include <prjxray/xilinx/bitstream_writer.h>
 #include <prjxray/xilinx/configuration_packet.h>
+#include <prjxray/xilinx/configuration_packet_with_payload.h>
 #include <prjxray/xilinx/configuration_register.h>
 
 #include <prjxray/bit_ops.h>
@@ -228,4 +234,82 @@ TEST(BitstreamWriterTest, WriteMulti) {
 	    // Type 1
 	    0x030006000};
 	EXPECT_EQ(words, ref);
+}
+
+namespace {
+
+std::vector<uint8_t> WriteWithEpoch(const char* epoch,
+                                    const std::string& frames_file,
+                                    const std::string& part_name,
+                                    int* rc) {
+	if (epoch)
+		setenv("SOURCE_DATE_EPOCH", epoch, 1);
+	else
+		unsetenv("SOURCE_DATE_EPOCH");
+	Series7::ConfigurationPackage packets;
+	packets.emplace_back(new ConfigurationPacketWithPayload<1, Series7::ConfRegType>(
+	    ConfigurationPacket<Series7::ConfRegType>::Opcode::Write,
+	    Series7::ConfRegType::IDCODE, {0x0362c093}));
+	const std::string path = testing::TempDir() + "header_test.bit";
+	std::remove(path.c_str());
+	BitstreamWriter<Series7> writer(packets);
+	*rc = writer.writeBitstream(packets, part_name, frames_file,
+	                            "xc7frames2bit", path);
+	unsetenv("SOURCE_DATE_EPOCH");
+	std::ifstream in(path, std::ios::binary);
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+	                           std::istreambuf_iterator<char>());
+	std::remove(path.c_str());
+	return bytes;
+}
+
+std::string HeaderText(const std::vector<uint8_t>& bytes) {
+	std::string out;
+	for (uint8_t b : bytes)
+		out.push_back(b >= 0x20 && b < 0x7f ? static_cast<char>(b) : '|');
+	return out;
+}
+
+}  // namespace
+
+TEST(BitstreamWriterTest, HeaderIsReproducibleUnderSourceDateEpoch) {
+	int rc_a = -1, rc_b = -1;
+	auto a = WriteWithEpoch("0", "/abs/dir/design.frames", "xc7a100tfgg484",
+	                        &rc_a);
+	auto b = WriteWithEpoch("0", "rel/other-dir/design.frames",
+	                        "xc7a100tfgg484", &rc_b);
+	ASSERT_EQ(rc_a, 0);
+	ASSERT_EQ(rc_b, 0);
+	EXPECT_EQ(a, b);
+	const std::string text = HeaderText(a);
+	EXPECT_NE(text.find("design.frames;Generator=xc7frames2bit"),
+	          std::string::npos)
+	    << text.substr(0, 120);
+	EXPECT_EQ(text.find("/abs/dir"), std::string::npos);
+	EXPECT_NE(text.find("1970/01/01"), std::string::npos);
+	EXPECT_NE(text.find("00:00:00"), std::string::npos);
+
+	auto c = WriteWithEpoch("1792801234", "design.frames", "xc7a100tfgg484",
+	                        &rc_a);
+	ASSERT_EQ(rc_a, 0);
+	EXPECT_NE(HeaderText(c).find("2026/10/24"), std::string::npos);
+	EXPECT_NE(HeaderText(c).find("00:20:34"), std::string::npos);
+}
+
+TEST(BitstreamWriterTest, HeaderRefusesABadEpochAndAnOverlongField) {
+	int rc = 0;
+	auto bad = WriteWithEpoch("-5", "design.frames", "xc7a100tfgg484", &rc);
+	EXPECT_EQ(rc, 1);
+	EXPECT_TRUE(bad.empty());
+	WriteWithEpoch("12abc", "design.frames", "xc7a100tfgg484", &rc);
+	EXPECT_EQ(rc, 1);
+	WriteWithEpoch("", "design.frames", "xc7a100tfgg484", &rc);
+	EXPECT_EQ(rc, 1);
+
+	WriteWithEpoch("0", "design.frames", std::string(65534, 'p'), &rc);
+	EXPECT_EQ(rc, 0);
+	auto overlong = WriteWithEpoch("0", "design.frames",
+	                               std::string(65535, 'p'), &rc);
+	EXPECT_EQ(rc, 1);
+	EXPECT_TRUE(overlong.empty());
 }
