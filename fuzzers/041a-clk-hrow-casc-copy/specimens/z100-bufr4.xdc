@@ -1,0 +1,15 @@
+# xc7z100ffg900-1: the four clock-capable P pads of bank 13 through BUFR_X0Y16..19
+# (HCLK_IOI3_X1Y234) into four top BUFGs
+set_property -dict {PACKAGE_PIN U25 IOSTANDARD LVCMOS33} [get_ports {clk[0]}]
+set_property -dict {PACKAGE_PIN U26 IOSTANDARD LVCMOS33} [get_ports {clk[1]}]
+set_property -dict {PACKAGE_PIN R25 IOSTANDARD LVCMOS33} [get_ports {clk[2]}]
+set_property -dict {PACKAGE_PIN R27 IOSTANDARD LVCMOS33} [get_ports {clk[3]}]
+set_property -dict {PACKAGE_PIN AA13 IOSTANDARD LVCMOS33} [get_ports led]
+set_property LOC BUFR_X0Y16 [get_cells {b[0].bufr_i}]
+set_property LOC BUFGCTRL_X0Y16 [get_cells {b[0].bufg_i}]
+set_property LOC BUFR_X0Y17 [get_cells {b[1].bufr_i}]
+set_property LOC BUFGCTRL_X0Y17 [get_cells {b[1].bufg_i}]
+set_property LOC BUFR_X0Y18 [get_cells {b[2].bufr_i}]
+set_property LOC BUFGCTRL_X0Y18 [get_cells {b[2].bufg_i}]
+set_property LOC BUFR_X0Y19 [get_cells {b[3].bufr_i}]
+set_property LOC BUFGCTRL_X0Y19 [get_cells {b[3].bufg_i}]

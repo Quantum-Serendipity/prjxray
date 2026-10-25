@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""Bit-level verification of the copied CLK_HROW CASC rows against a Vivado
+"""Bit-level verification of the copied CLK_HROW rows against a Vivado
 specimen bitstream.
 
-Inputs: the specimen's routed CLK_HROW pips (hrow_pips.txt, dumped by
-run.tcl from the routed design), the specimen decoded with bit2fasm
---verbose against the UNPATCHED db (before.fasm) and against the PATCHED
-db (after.fasm), the patched family db and the part's tilegrid.
+Inputs: the specimen's routed CLK_HROW pips (hrow_pips.txt, dumped from the
+routed design), the specimen decoded with bit2fasm --verbose against the
+UNPATCHED db (before.fasm) and against the PATCHED db (after.fasm), the
+patched family db and the part's tilegrid.
+
+The rows a specimen exercises are its routed CLK_HROW pips and the
+`<wire>_ACTIVE` row of every wire those pips use (Vivado sets the enable of
+each CLK_HROW wire that carries a clock).
 
 Checks:
-  1. every routed CASC pip that corresponds to a COPIED row is absent as a
-     feature in before.fasm and present in after.fasm;
+  1. every exercised row that is a COPIED row is absent as a feature in
+     before.fasm and present in after.fasm;
   2. the expected (frame, word, bit) positions of those rows -- computed
      from tilegrid + the copied bit patterns -- appear as unknown bits in
      before.fasm and NOT in after.fasm;
   3. the unknown bits that disappear between before and after are EXACTLY
      the expected positions (nothing else changed);
-  4. routed CASC pips whose rows pre-exist decode as features in BOTH
-     (calibration: the tile/frame math and the db agree on known rows).
+  4. exercised rows that pre-exist decode as features in BOTH
+     (calibration: the tile/frame math and the db agree on known rows);
+  5. after.fasm has no unknown bit left inside any CLK_HROW tile (the
+     patched db explains every bit Vivado set there);
+  6. no copied row decodes in after.fasm that the specimen did not
+     exercise.
 """
 import json
 import re
@@ -46,21 +54,32 @@ for tile_type in ("clk_hrow_bot_r", "clk_hrow_top_r"):
             feat, _, bits = line.partition(" ")
             segbits[feat] = bits.split()
 
-# --- the routed CASC pips of the specimen ----------------------------------
+# --- the rows the specimen exercises ---------------------------------------
 # hrow_pips.txt lines: "<net> <TILE>/<TILE_TYPE>.<SRC>->><DST>" (also <<->>)
 used = set()  # (tile_name, segbits_key)
+no_row = set()
 for line in (spec_dir / "hrow_pips.txt").read_text().splitlines():
     m = re.search(r"(\S+)/([A-Z0-9_]+)\.(\S+?)(<<)?->>?(\S+)$", line.strip())
     if not m:
         continue
     tile_name, tile_type, src, _, dst = m.groups()
-    if "CASC" not in src and "CASC" not in dst:
+    if not tile_type.startswith("CLK_HROW"):
         continue
-    used.add((tile_name, f"{tile_type}.{dst}.{src}"))
+    key = f"{tile_type}.{dst}.{src}"
+    if key in segbits:
+        used.add((tile_name, key))
+    else:
+        no_row.add((tile_name, key))
+    for wire in (src, dst):
+        active = f"{tile_type}.{wire}_ACTIVE"
+        if active in segbits:
+            used.add((tile_name, active))
 
 if not used:
-    print("FAIL: the specimen routed no CASC pip at all")
+    print("FAIL: the specimen routed no CLK_HROW pip with a row")
     sys.exit(1)
+for tile_name, key in sorted(no_row):
+    print(f"INFO: routed pip without a row (no bits): {tile_name} {key}")
 
 # --- expected bit positions ------------------------------------------------
 grid = json.load(tilegrid_p.open())
@@ -79,18 +98,32 @@ def expected_positions(tile_name, bits):
     return out
 
 
+hrow_tiles = {
+    tile_name: tile["bits"]["CLB_IO_CLK"]
+    for tile_name, tile in grid.items()
+    if tile["type"].startswith("CLK_HROW")
+}
+
+
+def in_hrow_tile(position):
+    frame, word, _ = position.split("_")
+    frame, word = int(frame, 16), int(word)
+    for tile_name, info in hrow_tiles.items():
+        base = int(info["baseaddr"], 16)
+        if base <= frame < base + info["frames"] and \
+                info["offset"] <= word < info["offset"] + info["words"]:
+            return tile_name
+    return None
+
+
 exp_copied = {}  # positions expected to move from unknown -> decoded
 calib = []  # (tile, key) with pre-existing rows
 for tile_name, key in sorted(used):
     if key in copied:
-        exp_copied[(tile_name,
-                    key)] = expected_positions(tile_name, copied[key])
-    elif key in segbits:
-        calib.append((tile_name, key))
+        exp_copied[(tile_name, key)] = expected_positions(
+            tile_name, copied[key])
     else:
-        print(
-            f"WARN: routed CASC pip has no row even in the patched db: "
-            f"{tile_name} {key}")
+        calib.append((tile_name, key))
 
 
 # --- parse the two fasm outputs --------------------------------------------
@@ -153,6 +186,25 @@ else:
         f"DIFF FAIL: resolved-not-expected={sorted(disappeared - all_expected)} "
         f"expected-not-resolved={sorted(all_expected - disappeared)}")
     fails += 1
+
+# check 5: nothing Vivado set in a CLK_HROW tile is left unexplained
+left = sorted((in_hrow_tile(u), u) for u in after_u if in_hrow_tile(u))
+if left:
+    print(f"HROW FAIL: unknown bits left in CLK_HROW tiles: {left}")
+    fails += 1
+else:
+    print("HROW ok: no unknown bit left in any CLK_HROW tile")
+
+# check 6: no copied row decodes that the specimen did not exercise
+exercised = {f"{t}.{k.split('.', 1)[1]}" for t, k in exp_copied}
+spurious = sorted(
+    f for f in after_f - exercised if f.split(".", 1)[0] in hrow_tiles
+    and f"{grid[f.split('.', 1)[0]]['type']}.{f.split('.', 1)[1]}" in copied)
+if spurious:
+    print(f"SPURIOUS FAIL: copied rows decoded but not exercised: {spurious}")
+    fails += 1
+else:
+    print("SPURIOUS ok: every copied row that decodes was exercised")
 
 print(
     f"copied-rows-exercised={len(exp_copied)} calibration-rows={len(calib)} "

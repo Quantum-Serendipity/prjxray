@@ -249,6 +249,7 @@ endif
 endif
 endif
 $(eval $(call fuzzer,100-dsp-mskpat,005-tilegrid,all))
+$(eval $(call fuzzer,100-dsp-mskpat-selpat-c,005-tilegrid,all))
 ifneq ($(SKIP_DSP),1)
 $(eval $(call fuzzer,101-dsp-pips,005-tilegrid,all))
 endif
