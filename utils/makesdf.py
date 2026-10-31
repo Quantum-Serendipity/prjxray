@@ -25,6 +25,22 @@ def get_elems_count(timings, slice, site, bel_type):
     return combinational, sequential
 
 
+EARLY_CHECKS = ('hold', 'removal')
+
+
+def corner_worst(entry, corner):
+    lo = entry[corner + '_MIN']
+    hi = entry[corner + '_MAX']
+    return lo if float(lo) >= float(hi) else hi
+
+
+def check_value(entry):
+    if entry['sequential'] in EARLY_CHECKS:
+        return '{}::{}'.format(
+            corner_worst(entry, 'FAST'), corner_worst(entry, 'SLOW'))
+    return '{SLOW_MIN}::{SLOW_MAX}'.format(**entry)
+
+
 def produce_sdf(timings, outdir):
 
     for slice in timings:
@@ -88,8 +104,9 @@ def produce_sdf(timings, outdir):
                             continue
                         timingcheck = \
 """
-            ({prop} {input} (posedge {clock}) ({SLOW_MIN}::{SLOW_MAX}))""".format(
+            ({prop} {input} (posedge {clock}) ({value}))""".format(
                         prop=timings[slice][site][bel_type][delay]['sequential'].upper(),
+                        value=check_value(timings[slice][site][bel_type][delay]),
                         **timings[slice][site][bel_type][delay])
 
                         if 'extra_ports' in timings[slice][site][bel_type][
