@@ -240,6 +240,18 @@ def main():
         os.path.join(args.dump, 'indices.tsv'))
     part_types = set(pips) | set(wires) | set(site_pins)
 
+    grid_path = os.path.join(args.db_family, part['device'], 'tilegrid.json')
+    if not os.path.exists(grid_path):
+        print('regrade: no tilegrid at {}'.format(grid_path), file=sys.stderr)
+        return 1
+    with open(grid_path) as f:
+        grid_types = {t['type'] for t in json.load(f).values()}
+    missing = sorted(grid_types - part_types)
+    if missing:
+        print('regrade: tile types on {} absent from the dump: {}'.format(
+            part['device'], ', '.join(missing)), file=sys.stderr)
+        return 1
+
     census = Census()
     diffs_all = collections.Counter()
     covered = []
