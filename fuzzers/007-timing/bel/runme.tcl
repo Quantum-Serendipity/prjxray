@@ -29,6 +29,8 @@ proc place_and_route_design {} {
     write_checkpoint -force design.dcp
 }
 
+set ::site_type_alias {}
+
 proc dump_tile_timings {tile timing_fp config_fp pins_fp tile_pins_fp} {
 
     set properties [list "DELAY" "FAST_MAX" "FAST_MIN" "SLOW_MAX" "SLOW_MIN"]
@@ -50,7 +52,7 @@ proc dump_tile_timings {tile timing_fp config_fp pins_fp tile_pins_fp} {
     lappend pins_line [llength $sites]
 
     foreach site $sites {
-        set site_type [get_property SITE_TYPE $site]
+        set site_type [string map $::site_type_alias [get_property SITE_TYPE $site]]
 
         lappend tile_pins_line $site_type
         lappend pins_line $site_type
@@ -134,9 +136,14 @@ proc dump {} {
     }
 
     set other_site_types [list ISERDESE2 OSERDESE2]
+    set ::site_type_alias {ISERDESE2 ILOGICE3 OSERDESE2 OLOGICE3}
     foreach site_type $other_site_types {
         set cell [create_cell -reference $site_type test]
-        place_design
+        if {[catch {place_design}]} {
+            set prefix [string map {ISERDESE2 ILOGIC OSERDESE2 OLOGIC} $site_type]
+            set site [lindex [get_sites -of_objects [get_tiles -filter {TYPE == LIOI3_SING}] -filter "NAME =~ ${prefix}_*"] 0]
+            place_cell $cell $site
+        }
         set tile [get_tiles -of [get_sites -of $cell]]
         dump_tile_timings $tile $timing_fp $property_fp $pins_fp $tile_pins_fp
         unplace_cell $cell

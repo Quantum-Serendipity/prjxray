@@ -611,6 +611,10 @@ def read_bel_properties(properties_file, properties_map):
                                         '.VALUES'):
                                 prop_name = prop_name[7:-7]
 
+                            elif prop_name.startswith('CONFIG.'):
+                                prop_loc += 2 + int(raw_props[prop_loc + 1])
+                                continue
+
                             prop_values_count = int(raw_props[prop_loc + 1])
 
                             if prop_name not in [

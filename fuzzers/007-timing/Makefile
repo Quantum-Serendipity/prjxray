@@ -14,6 +14,7 @@ all: pushdb
 clean:
 	cd bel && $(MAKE) clean
 	cd routing-bels && $(MAKE) clean
+	cd speed-grade && $(MAKE) clean
 
 bel/build/all_sdf.ok:
 	cd bel && $(MAKE)
@@ -31,6 +32,9 @@ pushdb: mergesdfs
 	mkdir -p ${XRAY_DATABASE_DIR}/${XRAY_DATABASE}/timings
 	cp sdfs/*.sdf ${XRAY_DATABASE_DIR}/${XRAY_DATABASE}/timings
 	touch run.ok
+
+speedgrade: mergesdfs
+	cd speed-grade && $(MAKE) SPEED_SDFS=$(CURDIR)/sdfs
 
 cleandb:
 	rm -rf ${XRAY_DATABASE_DIR}/${XRAY_DATABASE}/timings
