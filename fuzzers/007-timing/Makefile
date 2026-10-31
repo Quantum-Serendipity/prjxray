@@ -24,13 +24,13 @@ routing-bels/build/sdf.ok:
 
 mergesdfs: bel/build/all_sdf.ok routing-bels/build/sdf.ok
 	mkdir -p sdfs
-	cp bel/build/*.sdf sdfs
+	cp bel/build/*.sdf bel/build/corner sdfs
 	python3 ${XRAY_UTILS_DIR}/sdfmerge.py --sdfs $(SLICEM_SDFS) --site SLICEM --out sdfs/slicem.sdf
 	python3 ${XRAY_UTILS_DIR}/sdfmerge.py --sdfs $(SLICEL_SDFS) --site SLICEL --out sdfs/slicel.sdf
 
 pushdb: mergesdfs
 	mkdir -p ${XRAY_DATABASE_DIR}/${XRAY_DATABASE}/timings
-	cp sdfs/*.sdf ${XRAY_DATABASE_DIR}/${XRAY_DATABASE}/timings
+	cp sdfs/*.sdf sdfs/corner ${XRAY_DATABASE_DIR}/${XRAY_DATABASE}/timings
 	touch run.ok
 
 speedgrade: mergesdfs

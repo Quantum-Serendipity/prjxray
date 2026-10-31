@@ -11,6 +11,8 @@
 
 import json
 import argparse
+import os
+import subprocess
 
 from prjxray.util import OpenSafeFile
 
@@ -39,6 +41,33 @@ def check_value(entry):
         return '{}::{}'.format(
             corner_worst(entry, 'FAST'), corner_worst(entry, 'SLOW'))
     return '{SLOW_MIN}::{SLOW_MAX}'.format(**entry)
+
+
+CORNER_FILE = 'corner'
+
+
+def makesdf_revision():
+    here = os.path.dirname(os.path.realpath(__file__))
+    try:
+        rev = subprocess.run(
+            [
+                'git', '-C', here, 'describe', '--always', '--dirty',
+                '--abbrev=12', '--exclude', '*'
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+            check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        rev = ''
+    return rev or 'unknown'
+
+
+def write_corner(outdir):
+    with OpenSafeFile(os.path.join(outdir, CORNER_FILE), 'w') as fp:
+        fp.write(
+            'hold_removal=fast::slow setup_recovery=slow::slow makesdf={}\n'.
+            format(makesdf_revision()))
 
 
 def produce_sdf(timings, outdir):
@@ -147,6 +176,7 @@ def main():
         timings = json.load(fp)
 
     produce_sdf(timings, args.sdf)
+    write_corner(args.sdf)
 
 
 if __name__ == '__main__':

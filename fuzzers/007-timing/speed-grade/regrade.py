@@ -283,6 +283,10 @@ def main():
         return 1
     if args.compare_only:
         return 0
+    corner = os.path.join(args.sdfs, 'corner') if args.sdfs else None
+    if corner is not None and not os.path.isfile(corner):
+        print('regrade: no corner file beside the SDFs in {}'.format(args.sdfs), file=sys.stderr)
+        return 1
 
     out = args.out or os.path.join(
         args.db_family, 'speed', part['device'] + part['speed'])
@@ -302,6 +306,7 @@ def main():
         os.makedirs(os.path.join(out, 'timings'), exist_ok=True)
         for sdf in sdfs:
             shutil.copyfile(sdf, os.path.join(out, 'timings', os.path.basename(sdf)))
+        shutil.copyfile(corner, os.path.join(out, 'timings', 'corner'))
         prov['timings'] = [os.path.basename(x) for x in sdfs]
     with open(os.path.join(out, 'speed.json'), 'w') as f:
         json.dump(prov, f, indent=2, sort_keys=True)
