@@ -148,11 +148,12 @@ class TestStringMethods(unittest.TestCase):
 
     def test_badkey(self):
         '''Bad key should throw syntax error'''
-        try:
+        with self.assertRaises(Exception) as cm:
             self.fasm2frames("CLBLM_L_X10Y102.SLICEM_X0.SRUSEDMUX 2")
-            self.fail("Expected syntax error")
-        except TextXSyntaxError:
-            pass
+        e = cm.exception
+        self.assertTrue(
+            isinstance(e, TextXSyntaxError)
+            or str(e).startswith('Parse error at 1:'), repr(e))
 
     @unittest.skip
     def test_dupkey(self):
